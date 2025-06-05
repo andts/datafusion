@@ -20,7 +20,7 @@ use super::{
     from_field_reference, from_filter_rel, from_if_then, from_join_rel, from_literal,
     from_project_rel, from_read_rel, from_scalar_function, from_set_rel,
     from_singular_or_list, from_sort_rel, from_subquery, from_substrait_rel,
-    from_substrait_rex, from_window_function,
+    from_substrait_rex, from_window_function, from_write_rel
 };
 use crate::extensions::Extensions;
 use async_trait::async_trait;
@@ -33,11 +33,11 @@ use datafusion::execution::{FunctionRegistry, SessionState};
 use datafusion::logical_expr::{Expr, Extension, LogicalPlan};
 use std::sync::Arc;
 use substrait::proto;
-use substrait::proto::expression as substrait_expression;
 use substrait::proto::expression::{
     Enum, FieldReference, IfThen, Literal, MultiOrList, Nested, ScalarFunction,
     SingularOrList, SwitchExpression, WindowFunction,
 };
+use substrait::proto::{expression as substrait_expression, WriteRel};
 use substrait::proto::{
     r#type, AggregateRel, ConsistentPartitionWindowRel, CrossRel, DynamicParameter,
     ExchangeRel, Expression, ExtensionLeafRel, ExtensionMultiRel, ExtensionSingleRel,
@@ -241,6 +241,13 @@ pub trait SubstraitConsumer: Send + Sync + Sized {
         _rel: &ConsistentPartitionWindowRel,
     ) -> datafusion::common::Result<LogicalPlan> {
         not_impl_err!("Consistent Partition Window Rel not supported")
+    }
+
+    async fn consume_write(
+        &self,
+        rel: &WriteRel,
+    ) -> datafusion::common::Result<LogicalPlan> {
+        from_write_rel(self, rel).await
     }
 
     async fn consume_exchange(

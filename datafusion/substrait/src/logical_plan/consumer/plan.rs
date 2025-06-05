@@ -73,6 +73,10 @@ pub async fn from_substrait_plan_with_consumer(
                                 let new_aggr_exprs = rename_expressions(a.aggr_expr, a.input.schema(), expr_fields)?;
                                 Ok(LogicalPlan::Aggregate(Aggregate::try_new(a.input, new_group_exprs, new_aggr_exprs)?))
                             },
+                            // No need to add projection on top of CTAS
+                            LogicalPlan::Ddl(_) => {
+                                Ok(plan)
+                            }
                             // There are probably more plans where we could bake things in, can add them later as needed.
                             // Otherwise, add a new Project to handle the renaming.
                             _ => Ok(LogicalPlan::Projection(Projection::try_new(rename_expressions(plan.schema().columns().iter().map(|c| col(c.to_owned())), plan.schema(), renamed_schema.fields())?, Arc::new(plan))?))
