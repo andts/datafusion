@@ -16,6 +16,7 @@
 // under the License.
 
 mod aggregate_rel;
+mod ddl_rel;
 mod exchange_rel;
 mod fetch_rel;
 mod filter_rel;
@@ -26,6 +27,7 @@ mod set_rel;
 mod sort_rel;
 
 pub use aggregate_rel::*;
+pub use ddl_rel::*;
 pub use exchange_rel::*;
 pub use fetch_rel::*;
 pub use filter_rel::*;
@@ -65,7 +67,7 @@ pub fn to_substrait_rel(
         LogicalPlan::Extension(plan) => producer.handle_extension(plan),
         LogicalPlan::Distinct(plan) => producer.handle_distinct(plan),
         LogicalPlan::Dml(plan) => not_impl_err!("Unsupported plan type: {plan:?}")?,
-        LogicalPlan::Ddl(plan) => not_impl_err!("Unsupported plan type: {plan:?}")?,
+        LogicalPlan::Ddl(plan) => producer.handle_ddl(plan),
         LogicalPlan::Copy(plan) => not_impl_err!("Unsupported plan type: {plan:?}")?,
         LogicalPlan::DescribeTable(plan) => {
             not_impl_err!("Unsupported plan type: {plan:?}")?

@@ -25,6 +25,7 @@ mod project_rel;
 mod read_rel;
 mod set_rel;
 mod sort_rel;
+mod write_rel;
 
 pub use aggregate_rel::*;
 pub use cross_rel::*;
@@ -36,6 +37,7 @@ pub use project_rel::*;
 pub use read_rel::*;
 pub use set_rel::*;
 pub use sort_rel::*;
+pub use write_rel::*;
 
 use crate::logical_plan::consumer::SubstraitConsumer;
 use crate::logical_plan::consumer::utils::NameTracker;
@@ -71,6 +73,7 @@ pub async fn from_substrait_rel(
             RelType::Window(rel) => {
                 consumer.consume_consistent_partition_window(rel).await
             }
+            RelType::Write(rel) => consumer.consume_write(rel).await,
             RelType::Exchange(rel) => consumer.consume_exchange(rel).await,
             rt => not_impl_err!("{rt:?} rel not supported yet"),
         },
