@@ -18,9 +18,9 @@
 use crate::extensions::Extensions;
 use crate::logical_plan::producer::{
     from_aggregate, from_aggregate_function, from_alias, from_between, from_binary_expr,
-    from_case, from_cast, from_column, from_distinct, from_empty_relation, from_exists,
-    from_filter, from_higher_order_function, from_in_list, from_in_subquery, from_join,
-    from_like, from_limit, from_literal, from_placeholder, from_projection,
+    from_case, from_cast, from_column, from_ddl, from_distinct, from_empty_relation,
+    from_exists, from_filter, from_higher_order_function, from_in_list, from_in_subquery,
+    from_join, from_like, from_limit, from_literal, from_placeholder, from_projection,
     from_repartition, from_scalar_function, from_scalar_subquery, from_set_comparison,
     from_sort, from_subquery_alias, from_table_scan, from_try_cast, from_unary_expr,
     from_union, from_values, from_window, from_window_function, to_substrait_rel,
@@ -34,9 +34,9 @@ use datafusion::logical_expr::expr::{
     Alias, Exists, InList, InSubquery, Placeholder, SetComparison, WindowFunction,
 };
 use datafusion::logical_expr::{
-    Aggregate, Between, BinaryExpr, Case, Cast, Distinct, EmptyRelation, Expr, Extension,
-    Filter, Join, Like, Limit, LogicalPlan, Projection, Repartition, Sort, SubqueryAlias,
-    TableScan, TryCast, Union, Values, Window, expr,
+    Aggregate, Between, BinaryExpr, Case, Cast, DdlStatement, Distinct,
+    EmptyRelation, Expr, Extension, Filter, Join, Like, Limit, LogicalPlan, Projection,
+    Repartition, Sort, SubqueryAlias, TableScan, TryCast, Union, Values, Window,expr,
 };
 use pbjson_types::Any as ProtoAny;
 use substrait::proto::aggregate_rel::Measure;
@@ -223,6 +223,13 @@ pub trait SubstraitProducer: Send + Sync + Sized {
         plan: &Distinct,
     ) -> datafusion::common::Result<Box<Rel>> {
         from_distinct(self, plan)
+    }
+
+    fn handle_ddl(
+        &mut self,
+        plan: &DdlStatement,
+    ) -> datafusion::common::Result<Box<Rel>> {
+        from_ddl(self, plan)
     }
 
     fn handle_extension(
