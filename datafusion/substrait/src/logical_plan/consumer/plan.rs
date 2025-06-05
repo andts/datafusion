@@ -99,6 +99,10 @@ pub async fn from_substrait_plan_with_consumer(
                                     new_group_exprs,
                                     new_aggr_exprs,
                                 )?))
+                            },
+                            // No need to add projection on top of CTAS
+                            LogicalPlan::Ddl(_) => {
+                                Ok(plan)
                             }
                             // There are probably more plans where we could bake things in, can add them later as needed.
                             // Otherwise, add a new Project to handle the renaming.
