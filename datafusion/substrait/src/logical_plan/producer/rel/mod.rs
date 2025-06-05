@@ -24,6 +24,7 @@ mod project_rel;
 mod read_rel;
 mod set_rel;
 mod sort_rel;
+mod ddl_rel;
 
 pub use aggregate_rel::*;
 pub use exchange_rel::*;
@@ -34,6 +35,7 @@ pub use project_rel::*;
 pub use read_rel::*;
 pub use set_rel::*;
 pub use sort_rel::*;
+pub use ddl_rel::*;
 
 use crate::logical_plan::producer::SubstraitProducer;
 use datafusion::common::not_impl_err;
@@ -65,7 +67,7 @@ pub fn to_substrait_rel(
         LogicalPlan::Extension(plan) => producer.handle_extension(plan),
         LogicalPlan::Distinct(plan) => producer.handle_distinct(plan),
         LogicalPlan::Dml(plan) => not_impl_err!("Unsupported plan type: {plan:?}")?,
-        LogicalPlan::Ddl(plan) => not_impl_err!("Unsupported plan type: {plan:?}")?,
+        LogicalPlan::Ddl(plan) => producer.handle_ddl(plan),
         LogicalPlan::Copy(plan) => not_impl_err!("Unsupported plan type: {plan:?}")?,
         LogicalPlan::DescribeTable(plan) => {
             not_impl_err!("Unsupported plan type: {plan:?}")?

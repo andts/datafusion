@@ -758,6 +758,22 @@ async fn roundtrip_union_all() -> Result<()> {
 }
 
 #[tokio::test]
+async fn roundtrip_ctas_simple() -> Result<()> {
+    roundtrip(
+        "CREATE TABLE new_data AS SELECT a, c, d, avg(b) FROM data GROUP BY GROUPING SETS ((a, c), (a), (d), ())",
+    )
+        .await
+}
+
+#[tokio::test]
+async fn roundtrip_ctas_with_joins() -> Result<()> {
+    roundtrip(
+        "CREATE TABLE new_data AS SELECT data.a FROM data FULL OUTER JOIN data2 ON data.a = data2.a",
+    )
+        .await
+}
+
+#[tokio::test]
 async fn simple_intersect() -> Result<()> {
     async fn check_wildcard(syntax: &str) -> Result<()> {
         let expected_plan_str = format!(
