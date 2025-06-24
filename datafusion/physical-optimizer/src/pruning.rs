@@ -1531,11 +1531,7 @@ fn build_statistics_expr(
             ))
         }
         Operator::NotLikeMatch => build_not_like_match(expr_builder)?,
-        Operator::LikeMatch => build_like_match(expr_builder).ok_or_else(|| {
-            plan_datafusion_err!(
-                "LIKE expression with wildcard at the beginning is not supported"
-            )
-        })?,
+        Operator::LikeMatch => build_like_match(expr_builder)?,
         Operator::Gt => {
             // column > literal => (min, max) > literal => max > literal
             Arc::new(phys_expr::BinaryExpr::new(
@@ -1584,10 +1580,10 @@ fn unpack_string(s: &ScalarValue) -> Option<&str> {
     s.try_as_str().flatten()
 }
 
-fn extract_string_literal(expr: &Arc<dyn PhysicalExpr>) -> Option<&str> {
+fn extract_string_literal(expr: &Arc<dyn PhysicalExpr>) -> Option<(&str, DataType)> {
     if let Some(lit) = expr.as_any().downcast_ref::<phys_expr::Literal>() {
         let s = unpack_string(lit.value())?;
-        return Some(s);
+        return Some((s, lit.value().data_type()));
     }
     None
 }
@@ -1597,7 +1593,7 @@ fn extract_string_literal(expr: &Arc<dyn PhysicalExpr>) -> Option<&str> {
 /// lowest string after all P* strings.
 fn build_like_match(
     expr_builder: &mut PruningExpressionBuilder,
-) -> Option<Arc<dyn PhysicalExpr>> {
+) -> Result<Arc<dyn PhysicalExpr>> {
     // column LIKE literal => (min, max) LIKE literal split at % => min <= split literal && split literal <= max
     // column LIKE 'foo%' => min <= 'foo' && 'foo' <= max
     // column LIKE '%foo' => min <= '' && '' <= max => true
@@ -1606,31 +1602,42 @@ fn build_like_match(
 
     // TODO Handle ILIKE perhaps by making the min lowercase and max uppercase
     //  this may involve building the physical expressions that call lower() and upper()
-    let min_column_expr = expr_builder.min_column_expr().ok()?;
-    let max_column_expr = expr_builder.max_column_expr().ok()?;
+    let min_column_expr = expr_builder.min_column_expr()?;
+    let max_column_expr = expr_builder.max_column_expr()?;
     let scalar_expr = expr_builder.scalar_expr();
     // check that the scalar is a string literal
-    let s = extract_string_literal(scalar_expr)?;
+    let (lit_value, lit_value_type) =
+        extract_string_literal(scalar_expr).ok_or_else(|| {
+            plan_datafusion_err!(
+                "only literal expressions supported as a pattern for LIKE, got {}",
+                scalar_expr
+            )
+        })?;
+
     // ANSI SQL specifies two wildcards: % and _. % matches zero or more characters, _ matches exactly one character.
-    let first_wildcard_index = s.find(['%', '_']);
+    let first_wildcard_index = lit_value.find(['%', '_']);
     if first_wildcard_index == Some(0) {
         // there's no filtering we could possibly do, return an error and have this be handled by the unhandled hook
-        return None;
+        return Err(plan_datafusion_err!(
+            "LIKE expression with wildcard at the beginning is not supported"
+        ));
     }
     let (lower_bound, upper_bound) = if let Some(wildcard_index) = first_wildcard_index {
-        let prefix = &s[..wildcard_index];
-        let lower_bound_lit = Arc::new(phys_expr::Literal::new(ScalarValue::Utf8(Some(
-            prefix.to_string(),
-        ))));
-        let upper_bound_lit = Arc::new(phys_expr::Literal::new(ScalarValue::Utf8(Some(
-            increment_utf8(prefix)?,
-        ))));
+        let prefix = &lit_value[..wildcard_index];
+        let lower_bound_lit = create_bound_literal(prefix, &lit_value_type)?; // or throw the error?
+        let upper_bound_lit = create_bound_literal(
+            &increment_utf8(prefix).ok_or_else(|| {
+                plan_datafusion_err!(
+                    "can't calculate an upper bound for pattern {}",
+                    prefix
+                )
+            })?,
+            &lit_value_type,
+        )?;
         (lower_bound_lit, upper_bound_lit)
     } else {
         // the like expression is a literal and can be converted into a comparison
-        let bound = Arc::new(phys_expr::Literal::new(ScalarValue::Utf8(Some(
-            s.to_string(),
-        ))));
+        let bound = create_bound_literal(lit_value, &lit_value_type)?;
         (Arc::clone(&bound), bound)
     };
     let lower_bound_expr = Arc::new(phys_expr::BinaryExpr::new(
@@ -1648,7 +1655,23 @@ fn build_like_match(
         Operator::And,
         lower_bound_expr,
     ));
-    Some(combined)
+    Ok(combined)
+}
+
+fn create_bound_literal(
+    value: &str,
+    original_literal_type: &DataType,
+) -> Result<Arc<phys_expr::Literal>> {
+    let lit_value = match original_literal_type {
+        DataType::Utf8 => ScalarValue::Utf8(Some(value.to_string())),
+        DataType::LargeUtf8 => ScalarValue::LargeUtf8(Some(value.to_string())),
+        DataType::Utf8View => ScalarValue::Utf8View(Some(value.to_string())),
+        _ => return Err(plan_datafusion_err!(
+            "unsupported literal value type: {}",
+            original_literal_type
+        )),
+    };
+    Ok(Arc::new(phys_expr::Literal::new(lit_value)))
 }
 
 // For predicate `col NOT LIKE 'const_prefix%'`, we rewrite it as `(col_min NOT LIKE 'const_prefix%' OR col_max NOT LIKE 'const_prefix%')`.
@@ -1666,9 +1689,11 @@ fn build_not_like_match(
 
     let scalar_expr = expr_builder.scalar_expr();
 
-    let pattern = extract_string_literal(scalar_expr).ok_or_else(|| {
-        plan_datafusion_err!("cannot extract literal from NOT LIKE expression")
-    })?;
+    let pattern = extract_string_literal(scalar_expr)
+        .ok_or_else(|| {
+            plan_datafusion_err!("cannot extract literal from NOT LIKE expression")
+        })?
+        .0;
 
     let (const_prefix, remaining) = split_constant_prefix(pattern);
     if const_prefix.is_empty() || remaining != "%" {
@@ -1828,7 +1853,7 @@ mod tests {
     use datafusion_expr::{and, col, lit, or};
     use insta::assert_snapshot;
 
-    use arrow::array::Decimal128Array;
+    use arrow::array::{Decimal128Array, StringViewArray};
     use arrow::{
         array::{BinaryArray, Int32Array, Int64Array, StringArray, UInt64Array},
         datatypes::TimeUnit,
@@ -1909,6 +1934,15 @@ mod tests {
             Self::new()
                 .with_min(Arc::new(min.into_iter().collect::<StringArray>()))
                 .with_max(Arc::new(max.into_iter().collect::<StringArray>()))
+        }
+
+        fn new_utf8view<'a>(
+            min: impl IntoIterator<Item = Option<&'a str>>,
+            max: impl IntoIterator<Item = Option<&'a str>>,
+        ) -> Self {
+            Self::new()
+                .with_min(Arc::new(min.into_iter().collect::<StringViewArray>()))
+                .with_max(Arc::new(max.into_iter().collect::<StringViewArray>()))
         }
 
         fn new_bool(
@@ -2379,6 +2413,26 @@ mod tests {
                 StatisticsType::Min,
                 Field::new("s3_min", DataType::Utf8, true),
             ),
+            (
+                phys_expr::Column::new("s4", 3),
+                StatisticsType::Max,
+                Field::new("s4_max", DataType::Utf8View, true),
+            ),
+            (
+                phys_expr::Column::new("s4", 3),
+                StatisticsType::Min,
+                Field::new("s4_min", DataType::Utf8View, true),
+            ),
+            (
+                phys_expr::Column::new("s5", 3),
+                StatisticsType::Max,
+                Field::new("s5_max", DataType::LargeUtf8, true),
+            ),
+            (
+                phys_expr::Column::new("s5", 3),
+                StatisticsType::Min,
+                Field::new("s5_min", DataType::LargeUtf8, true),
+            ),
         ]);
 
         let statistics = TestStatistics::new()
@@ -2402,19 +2456,26 @@ mod tests {
                     vec![Some("a"), None, None, None],      // min
                     vec![Some("q"), None, Some("r"), None], // max
                 ),
+            )
+            .with(
+                "s4",
+                ContainerStats::new_utf8view(
+                    vec![Some("a"), None, None, None],      // min
+                    vec![Some("q"), None, Some("r"), None], // max
+                ),
             );
 
         let batch =
             build_statistics_record_batch(&statistics, &required_columns).unwrap();
         assert_snapshot!(batches_to_string(&[batch]), @r"
-        +--------+--------+--------+--------+
-        | s1_min | s2_max | s3_max | s3_min |
-        +--------+--------+--------+--------+
-        |        | 20     | q      | a      |
-        |        |        |        |        |
-        | 9      |        | r      |        |
-        |        |        |        |        |
-        +--------+--------+--------+--------+
+        +--------+--------+--------+--------+--------+--------+
+        | s1_min | s2_max | s3_max | s3_min | s4_min | s4_min |
+        +--------+--------+--------+--------+--------+--------+
+        |        | 20     | q      | a      | q      | a      |
+        |        |        |        |        |        |        |
+        | 9      |        | r      |        | r      |        |
+        |        |        |        |        |        |        |
+        +--------+--------+--------+--------+--------+--------+        
         ");
     }
 
