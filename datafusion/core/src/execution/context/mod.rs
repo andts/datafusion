@@ -811,6 +811,13 @@ impl SessionContext {
         Ok(DataFrame::new(self.state(), plan))
     }
 
+    fn return_single_number_dataframe(&self, number: u64) -> Result<DataFrame> {
+        use std::sync::Arc;
+        use arrow::array::{ArrayRef, UInt64Array};
+        let value: ArrayRef = Arc::new(UInt64Array::from_value(number, 1));
+        DataFrame::from_columns(vec![("result", value)])
+    }
+
     async fn create_external_table(
         &self,
         cmd: &CreateExternalTable,
@@ -888,6 +895,8 @@ impl SessionContext {
                 let physical = DataFrame::new(self.state(), input);
 
                 let batches: Vec<_> = physical.collect_partitioned().await?;
+                let row_count = Self::calculate_row_count(&batches);
+
                 let table = Arc::new(
                     // pass constraints and column defaults to the mem table.
                     MemTable::try_new(schema, batches)?
@@ -896,7 +905,7 @@ impl SessionContext {
                 );
 
                 self.register_table(name.clone(), table)?;
-                self.return_empty_dataframe()
+                self.return_single_number_dataframe(row_count as u64)
             }
             (true, true, Ok(_)) => {
                 exec_err!("'IF NOT EXISTS' cannot coexist with 'REPLACE'")
@@ -906,6 +915,8 @@ impl SessionContext {
                 let physical = DataFrame::new(self.state(), input);
 
                 let batches: Vec<_> = physical.collect_partitioned().await?;
+                let row_count = Self::calculate_row_count(&batches);
+
                 let table = Arc::new(
                     // pass constraints and column defaults to the mem table.
                     MemTable::try_new(schema, batches)?
@@ -914,10 +925,19 @@ impl SessionContext {
                 );
 
                 self.register_table(name, table)?;
-                self.return_empty_dataframe()
+                self.return_single_number_dataframe(row_count as u64)
             }
             (false, false, Ok(_)) => exec_err!("Table '{name}' already exists"),
         }
+    }
+
+    fn calculate_row_count(batches: &Vec<Vec<RecordBatch>>) -> usize {
+        let row_count: usize = batches
+            .iter()
+            .flatten()
+            .map(|b| b.num_rows())
+            .sum();
+        row_count
     }
 
     /// Applies the `TypeCoercion` rewriter to the logical plan.
