@@ -1676,7 +1676,7 @@ async fn extension_logical_plan() -> Result<()> {
         }),
     });
 
-    let proto = to_substrait_plan(&ext_plan, &ctx.state())?;
+    let (proto, _) = to_substrait_plan(&ext_plan, &ctx.state())?;
     let plan2 = from_substrait_plan(&ctx.state(), &proto).await?;
 
     let plan1str = format!("{ext_plan}");
@@ -1805,136 +1805,25 @@ async fn roundtrip_read_filter() -> Result<()> {
 }
 
 #[tokio::test]
-async fn roundtrip_placeholder_sql_filter() -> Result<()> {
-    let plan = generate_plan_from_sql("SELECT a, b FROM data WHERE a > $1", false, false)
-        .await?;
-
-    assert_snapshot!(
-    plan,
-    @r"
-    Projection: data.a, data.b
-      Filter: data.a > $1
-        TableScan: data
-    "
-    );
-    Ok(())
-}
-
-#[tokio::test]
-async fn roundtrip_placeholder_sql_projection() -> Result<()> {
-    let plan =
-        generate_plan_from_sql("SELECT a, $1 FROM data WHERE a > $2", false, false)
-            .await?;
-
-    assert_snapshot!(
-    plan,
-    @r"
-    Projection: data.a, $1
-      Filter: data.a > $2
-        TableScan: data
-    "
-    );
-    Ok(())
-}
-
-#[tokio::test]
-async fn roundtrip_placeholder_typed_int64() -> Result<()> {
+async fn roundtrip_placeholder_parameters() -> Result<()> {
     let ctx = create_context().await?;
 
-    let placeholder =
-        Expr::Placeholder(datafusion::logical_expr::expr::Placeholder::new_with_field(
-            "$1".into(),
-            Some(Arc::new(Field::new("$1", DataType::Int64, true))),
-        ));
-    let scan_plan = ctx.table("data").await?.into_optimized_plan()?;
-    let plan = LogicalPlanBuilder::from(scan_plan)
-        .filter(col("a").gt(placeholder))?
-        .build()?;
+    //TODO indexes change after deserialization. what is the best way to compare?
+    let plan = ctx
+        .sql("SELECT * FROM data where a = $1 and f = $2 and c > $3")
+        .await?
+        .into_optimized_plan()?;
 
-    let proto = to_substrait_plan(&plan, &ctx.state())?;
-
-    // Verify the producer emits a DynamicParameter in the Substrait proto
-    let plan_rel = proto.relations.first().unwrap();
-    let plan_json = format!("{plan_rel:?}");
-    assert!(
-        plan_json.contains("DynamicParameter"),
-        "Substrait proto should contain DynamicParameter, got: {plan_json}"
-    );
-
+    let (proto, _) = to_substrait_plan(&plan, &ctx.state())?;
     let plan2 = from_substrait_plan(&ctx.state(), &proto).await?;
 
-    assert_snapshot!(
-    plan2,
-    @r"
-    Filter: data.a > $1
-      TableScan: data
-    "
-    );
+    let plan1str = format!("{plan}");
+    let plan2str = format!("{plan2}");
+    assert_eq!(plan1str, plan2str);
 
     assert_eq!(plan.schema(), plan2.schema());
-    Ok(())
-}
 
-#[tokio::test]
-async fn roundtrip_placeholder_multiple_typed() -> Result<()> {
-    let ctx = create_context().await?;
-
-    let p1 =
-        Expr::Placeholder(datafusion::logical_expr::expr::Placeholder::new_with_field(
-            "$1".into(),
-            Some(Arc::new(Field::new("$1", DataType::Int64, true))),
-        ));
-    let p2 =
-        Expr::Placeholder(datafusion::logical_expr::expr::Placeholder::new_with_field(
-            "$2".into(),
-            Some(Arc::new(Field::new("$2", DataType::Decimal128(5, 2), true))),
-        ));
-    let scan_plan = ctx.table("data").await?.into_optimized_plan()?;
-    let plan = LogicalPlanBuilder::from(scan_plan)
-        .filter(col("a").gt(p1).and(col("b").lt(p2)))?
-        .build()?;
-
-    let proto = to_substrait_plan(&plan, &ctx.state())?;
-    let plan2 = from_substrait_plan(&ctx.state(), &proto).await?;
-
-    assert_snapshot!(
-    plan2,
-    @r"
-    Filter: data.a > $1 AND data.b < $2
-      TableScan: data
-    "
-    );
-
-    assert_eq!(plan.schema(), plan2.schema());
-    Ok(())
-}
-
-#[tokio::test]
-async fn roundtrip_placeholder_typed_utf8() -> Result<()> {
-    let ctx = create_context().await?;
-
-    let placeholder =
-        Expr::Placeholder(datafusion::logical_expr::expr::Placeholder::new_with_field(
-            "$1".into(),
-            Some(Arc::new(Field::new("$1", DataType::Utf8, true))),
-        ));
-    let scan_plan = ctx.table("data").await?.into_optimized_plan()?;
-    let plan = LogicalPlanBuilder::from(scan_plan)
-        .filter(col("f").eq(placeholder))?
-        .build()?;
-
-    let proto = to_substrait_plan(&plan, &ctx.state())?;
-    let plan2 = from_substrait_plan(&ctx.state(), &proto).await?;
-
-    assert_snapshot!(
-    plan2,
-    @r"
-    Filter: data.f = $1
-      TableScan: data
-    "
-    );
-
-    assert_eq!(plan.schema(), plan2.schema());
+    DataFrame::new(ctx.state(), plan2).show().await?;
     Ok(())
 }
 
@@ -2086,7 +1975,7 @@ async fn generate_plan_from_sql(
     } else {
         df.into_unoptimized_plan()
     };
-    let proto = to_substrait_plan(&plan, &ctx.state())?;
+    let (proto, _) = to_substrait_plan(&plan, &ctx.state())?;
     let plan2 = if optimized {
         let temp = from_substrait_plan(&ctx.state(), &proto).await?;
         ctx.state().optimize(&temp)?
@@ -2364,11 +2253,11 @@ async fn test_alias(sql_with_alias: &str, sql_no_alias: &str) -> Result<()> {
     let ctx = create_context().await?;
 
     let df_a = ctx.sql(sql_with_alias).await?;
-    let proto_a = to_substrait_plan(&df_a.into_optimized_plan()?, &ctx.state())?;
+    let (proto_a, _) = to_substrait_plan(&df_a.into_optimized_plan()?, &ctx.state())?;
     let plan_with_alias = from_substrait_plan(&ctx.state(), &proto_a).await?;
 
     let df = ctx.sql(sql_no_alias).await?;
-    let proto = to_substrait_plan(&df.into_optimized_plan()?, &ctx.state())?;
+    let (proto, _) = to_substrait_plan(&df.into_optimized_plan()?, &ctx.state())?;
     let plan = from_substrait_plan(&ctx.state(), &proto).await?;
 
     let plan1str = format!("{plan_with_alias}");

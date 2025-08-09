@@ -22,12 +22,13 @@ use datafusion::execution::SessionState;
 use datafusion::logical_expr::{LogicalPlan, SubqueryAlias};
 use substrait::proto::{Plan, PlanRel, Rel, RelRoot, plan_rel};
 use substrait::version;
+use std::collections::HashMap;
 
 /// Convert DataFusion LogicalPlan to Substrait Plan
 pub fn to_substrait_plan(
     plan: &LogicalPlan,
     state: &SessionState,
-) -> datafusion::common::Result<Box<Plan>> {
+) -> datafusion::common::Result<(Box<Plan>, Option<HashMap<String, u32>>)> {
     // Parse relation nodes
     // Generate PlanRel(s)
     // Note: Only 1 relation tree is currently supported
@@ -40,18 +41,29 @@ pub fn to_substrait_plan(
         })),
     }];
 
+    // Capture the dynamic parameter mapping before consuming the producer
+    let dynamic_parameter_mapping = producer.get_dynamic_parameter_mapping();
+    let parameter_mapping = if dynamic_parameter_mapping.is_empty() {
+        None
+    } else {
+        Some(dynamic_parameter_mapping)
+    };
+
     // Return parsed plan
     let extensions = producer.get_extensions();
-    Ok(Box::new(Plan {
-        version: Some(version::version_with_producer("datafusion")),
-        extension_urns: vec![],
-        extensions: extensions.into(),
-        relations: plan_rels,
-        advanced_extensions: None,
-        expected_type_urls: vec![],
-        parameter_bindings: vec![],
-        type_aliases: vec![],
-    }))
+    Ok((
+        Box::new(Plan {
+            version: Some(version::version_with_producer("datafusion")),
+            extension_urns: vec![],
+            extensions: extensions.into(),
+            relations: plan_rels,
+            advanced_extensions: None,
+            expected_type_urls: vec![],
+            parameter_bindings: vec![],
+            type_aliases: vec![],
+        }),
+        parameter_mapping,
+    ))
 }
 
 pub fn from_subquery_alias(

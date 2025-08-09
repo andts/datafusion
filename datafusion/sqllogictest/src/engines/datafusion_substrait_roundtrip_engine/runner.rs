@@ -156,7 +156,7 @@ async fn run_query_substrait_round_trip(
         | LogicalPlan::Statement(_) => df.logical_plan().clone(),
         // For any other plan, convert to Substrait
         logical_plan => {
-            let plan = to_substrait_plan(logical_plan, &state)?;
+            let (plan, _) = to_substrait_plan(logical_plan, &state)?;
             from_substrait_plan(&state, &plan).await?
         }
     };

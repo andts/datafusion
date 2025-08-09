@@ -17,10 +17,10 @@
 
 mod aggregate_function;
 mod cast;
+mod placeholder;
 mod field_reference;
 mod if_then;
-mod literal;
-mod placeholder;
+pub mod literal;
 mod scalar_function;
 mod singular_or_list;
 mod subquery;
@@ -28,10 +28,10 @@ mod window_function;
 
 pub use aggregate_function::*;
 pub use cast::*;
+pub use placeholder::*;
 pub use field_reference::*;
 pub use if_then::*;
 pub use literal::*;
-pub use placeholder::*;
 pub use scalar_function::*;
 pub use singular_or_list::*;
 pub use subquery::*;

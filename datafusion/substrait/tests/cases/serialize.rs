@@ -111,9 +111,8 @@ mod tests {
         ,
                 );
 
-        let plan = to_substrait_plan(&datafusion_plan, &ctx.state())?
-            .as_ref()
-            .clone();
+        let (proto_box, _) = to_substrait_plan(&datafusion_plan, &ctx.state())?;
+        let plan = proto_box.as_ref().clone();
 
         let relation = plan.relations.first().unwrap().rel_type.as_ref();
         let root_rel = match relation {
@@ -159,9 +158,8 @@ mod tests {
         ,
                 );
 
-        let plan = to_substrait_plan(&datafusion_plan, &ctx.state())?
-            .as_ref()
-            .clone();
+        let (proto_box, _) = to_substrait_plan(&datafusion_plan, &ctx.state())?;
+        let plan = proto_box.as_ref().clone();
 
         let relation = plan.relations.first().unwrap().rel_type.as_ref();
         let root_rel = match relation {

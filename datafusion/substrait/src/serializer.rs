@@ -54,7 +54,7 @@ pub async fn serialize(
 pub async fn serialize_bytes(sql: &str, ctx: &SessionContext) -> Result<Vec<u8>> {
     let df = ctx.sql(sql).await?;
     let plan = df.into_optimized_plan()?;
-    let proto = producer::to_substrait_plan(&plan, &ctx.state())?;
+    let (proto, _parameter_mapping) = producer::to_substrait_plan(&plan, &ctx.state())?;
 
     let mut protobuf_out = Vec::<u8>::new();
     proto
