@@ -20,14 +20,20 @@ use crate::logical_plan::producer::{
     from_aggregate, from_aggregate_function, from_alias, from_between, from_binary_expr,
     from_case, from_cast, from_column, from_ddl, from_distinct, from_empty_relation,
     from_filter, from_in_list, from_in_subquery, from_join, from_like, from_limit,
-    from_literal, from_projection, from_repartition, from_scalar_function, from_sort,
-    from_subquery_alias, from_table_scan, from_try_cast, from_unary_expr, from_union,
-    from_values, from_window, from_window_function, to_substrait_rel, to_substrait_rex,
+    from_literal, from_placeholder, from_projection, from_repartition,
+    from_scalar_function, from_sort, from_subquery_alias, from_table_scan, from_try_cast,
+    from_unary_expr, from_union, from_values, from_window, from_window_function,
+    to_substrait_rel, to_substrait_rex,
 };
 use datafusion::common::{Column, DFSchemaRef, ScalarValue, substrait_err};
 use datafusion::execution::SessionState;
 use datafusion::execution::registry::SerializerRegistry;
 use datafusion::logical_expr::expr::{Alias, InList, InSubquery, WindowFunction};
+use datafusion::arrow::datatypes::DataType;
+use std::collections::HashMap;
+use datafusion::logical_expr::expr::{
+    Alias, InList, InSubquery, Placeholder, WindowFunction,
+};
 use datafusion::logical_expr::{
     Aggregate, Between, BinaryExpr, Case, Cast, DdlStatement, Distinct,
     EmptyRelation, Expr, Extension, Filter, Join, Like, Limit, LogicalPlan, Projection,
@@ -56,6 +62,7 @@ use substrait::proto::{
 /// # use datafusion::error::Result;
 /// # use datafusion::execution::SessionState;
 /// # use datafusion::logical_expr::{Between, Extension, Projection};
+/// # use datafusion::arrow::datatypes::DataType;
 /// # use datafusion_substrait::extensions::Extensions;
 /// # use datafusion_substrait::logical_plan::producer::{from_projection, SubstraitProducer};
 ///
@@ -76,6 +83,20 @@ use substrait::proto::{
 ///
 ///     fn get_extensions(self) -> Extensions {
 ///         self.extensions
+///     }
+///
+///     fn register_dynamic_parameter(
+///         &mut self,
+///         identifier: &str,
+///         data_type: &Option<DataType>,
+///     ) -> datafusion::common::Result<u32> {
+///         // Custom parameter registration logic
+///         todo!()
+///     }
+///
+///     fn get_dynamic_parameter_mapping(&self) -> std::collections::HashMap<String, u32> {
+///         // Custom parameter mapping logic
+///         todo!()
 ///     }
 ///
 ///     // You can set additional metadata on the Rels you produce
@@ -130,6 +151,20 @@ pub trait SubstraitProducer: Send + Sync + Sized {
     /// Consume the producer to generate the [Extensions] for the Substrait plan based on the
     /// functions that have been registered
     fn get_extensions(self) -> Extensions;
+
+    /// Register a dynamic parameter with the given identifier and data type.
+    /// Returns a u32 parameter ID that can be used in Substrait expressions.
+    /// If the same identifier is registered again with the same type, returns the existing ID.
+    /// If the same identifier is registered with a different type, returns an error.
+    fn register_dynamic_parameter(
+        &mut self,
+        identifier: &str,
+        data_type: &Option<DataType>,
+    ) -> datafusion::common::Result<u32>;
+
+    /// Get the dynamic parameter mapping from original parameter identifiers to Substrait-compatible u32 IDs.
+    /// Returns a HashMap mapping the original dynamic parameter identifiers to their corresponding u32 IDs.
+    fn get_dynamic_parameter_mapping(&self) -> HashMap<String, u32>;
 
     // Logical Plan Methods
     // There is one method per LogicalPlan to allow for easy overriding of producer behaviour.
@@ -368,11 +403,23 @@ pub trait SubstraitProducer: Send + Sync + Sized {
     ) -> datafusion::common::Result<Expression> {
         from_in_subquery(self, in_subquery, schema)
     }
+
+    fn handle_placeholder(
+        &mut self,
+        placeholder: &Placeholder,
+    ) -> datafusion::common::Result<Expression> {
+        let parameter_id = self.register_dynamic_parameter(&placeholder.id, &placeholder.data_type)?;
+        from_placeholder(parameter_id, &placeholder.data_type)
+    }
 }
 
 pub struct DefaultSubstraitProducer<'a> {
     extensions: Extensions,
     serializer_registry: &'a dyn SerializerRegistry,
+    /// Map from parameter identifier to (parameter_id, data_type)
+    dynamic_parameters: HashMap<String, (u32, Option<DataType>)>,
+    /// Next parameter ID to assign
+    next_parameter_id: u32,
 }
 
 impl<'a> DefaultSubstraitProducer<'a> {
@@ -380,6 +427,8 @@ impl<'a> DefaultSubstraitProducer<'a> {
         DefaultSubstraitProducer {
             extensions: Extensions::default(),
             serializer_registry: state.serializer_registry().as_ref(),
+            dynamic_parameters: HashMap::new(),
+            next_parameter_id: 1,
         }
     }
 }
@@ -395,6 +444,45 @@ impl SubstraitProducer for DefaultSubstraitProducer<'_> {
 
     fn get_extensions(self) -> Extensions {
         self.extensions
+    }
+
+    fn register_dynamic_parameter(
+        &mut self,
+        identifier: &str,
+        data_type: &Option<DataType>,
+    ) -> datafusion::common::Result<u32> {
+        match self.dynamic_parameters.get(identifier) {
+            Some((existing_id, existing_type)) => {
+                // Check if types match
+                if existing_type == data_type {
+                    Ok(*existing_id)
+                } else {
+                    datafusion::common::plan_err!(
+                        "Dynamic parameter '{}' registered with different types: existing={:?}, new={:?}",
+                        identifier,
+                        existing_type,
+                        data_type
+                    )
+                }
+            }
+            None => {
+                // Register new parameter
+                let parameter_id = self.next_parameter_id;
+                self.dynamic_parameters.insert(
+                    identifier.to_string(),
+                    (parameter_id, data_type.clone()),
+                );
+                self.next_parameter_id += 1;
+                Ok(parameter_id)
+            }
+        }
+    }
+
+    fn get_dynamic_parameter_mapping(&self) -> HashMap<String, u32> {
+        self.dynamic_parameters
+            .iter()
+            .map(|(identifier, (parameter_id, _))| (identifier.clone(), *parameter_id))
+            .collect()
     }
 
     fn handle_extension(

@@ -17,6 +17,7 @@
 
 mod aggregate_function;
 mod cast;
+mod dynamic_parameter;
 mod field_reference;
 mod function_arguments;
 mod if_then;
@@ -28,6 +29,7 @@ mod window_function;
 
 pub use aggregate_function::*;
 pub use cast::*;
+pub use dynamic_parameter::*;
 pub use field_reference::*;
 pub use function_arguments::*;
 pub use if_then::*;

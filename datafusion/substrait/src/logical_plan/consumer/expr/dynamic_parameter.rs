@@ -15,15 +15,26 @@
 // specific language governing permissions and limitations
 // under the License.
 
-mod aggregation_tests;
-mod builtin_expr_semantics_tests;
-mod consumer_integration;
-mod emit_kind_tests;
-mod function_test;
-mod logical_plans;
-mod parameter_tests;
-mod roundtrip_logical_plan;
-#[cfg(feature = "physical")]
-mod roundtrip_physical_plan;
-mod serialize;
-mod substrait_validations;
+use crate::logical_plan::consumer::{from_substrait_type_without_names, SubstraitConsumer};
+use datafusion::common::DFSchema;
+use datafusion::logical_expr::{Expr, expr::Placeholder};
+use substrait::proto::DynamicParameter;
+
+/// Convert Substrait DynamicParameter to DataFusion Placeholder
+pub async fn from_dynamic_parameter(
+    consumer: &impl SubstraitConsumer,
+    expr: &DynamicParameter,
+    _input_schema: &DFSchema,
+) -> datafusion::common::Result<Expr> {
+    let data_type = match &expr.r#type {
+        Some(substrait_type) => {
+            Some(from_substrait_type_without_names(consumer, substrait_type)?)
+        }
+        None => None,
+    };
+
+    Ok(Expr::Placeholder(Placeholder {
+        id: format!("${}", expr.parameter_reference),
+        data_type,
+    }))
+}

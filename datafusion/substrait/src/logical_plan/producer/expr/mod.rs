@@ -17,9 +17,10 @@
 
 mod aggregate_function;
 mod cast;
+mod placeholder;
 mod field_reference;
 mod if_then;
-mod literal;
+pub mod literal;
 mod scalar_function;
 mod singular_or_list;
 mod subquery;
@@ -27,6 +28,7 @@ mod window_function;
 
 pub use aggregate_function::*;
 pub use cast::*;
+pub use placeholder::*;
 pub use field_reference::*;
 pub use if_then::*;
 pub use literal::*;
@@ -147,7 +149,7 @@ pub fn to_substrait_rex(
         #[expect(deprecated)]
         Expr::Wildcard { .. } => not_impl_err!("Cannot convert {expr:?} to Substrait"),
         Expr::GroupingSet(expr) => not_impl_err!("Cannot convert {expr:?} to Substrait"),
-        Expr::Placeholder(expr) => not_impl_err!("Cannot convert {expr:?} to Substrait"),
+        Expr::Placeholder(expr) => producer.handle_placeholder(expr),
         Expr::OuterReferenceColumn(_, _) => {
             not_impl_err!("Cannot convert {expr:?} to Substrait")
         }

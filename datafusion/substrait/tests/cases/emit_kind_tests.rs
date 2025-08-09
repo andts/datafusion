@@ -93,7 +93,7 @@ mod tests {
           TableScan: data
         "        );
 
-        let proto = to_substrait_plan(&plan, &ctx.state())?;
+        let (proto, _) = to_substrait_plan(&plan, &ctx.state())?;
         let plan2 = from_substrait_plan(&ctx.state(), &proto).await?;
         // note how the Projections are not flattened
         assert_snapshot!(
@@ -121,7 +121,7 @@ mod tests {
         "
                 );
 
-        let proto = to_substrait_plan(&plan, &ctx.state())?;
+        let (proto, _) = to_substrait_plan(&plan, &ctx.state())?;
         let plan2 = from_substrait_plan(&ctx.state(), &proto).await?;
 
         let plan1str = format!("{plan}");

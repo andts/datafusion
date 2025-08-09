@@ -1587,7 +1587,7 @@ async fn extension_logical_plan() -> Result<()> {
         }),
     });
 
-    let proto = to_substrait_plan(&ext_plan, &ctx.state())?;
+    let (proto, _) = to_substrait_plan(&ext_plan, &ctx.state())?;
     let plan2 = from_substrait_plan(&ctx.state(), &proto).await?;
 
     let plan1str = format!("{ext_plan}");
@@ -1713,6 +1713,48 @@ async fn roundtrip_repartition_hash() -> Result<()> {
 #[tokio::test]
 async fn roundtrip_read_filter() -> Result<()> {
     roundtrip_verify_read_filter_count("SELECT a FROM data where a < 5", 1).await
+}
+
+#[tokio::test]
+async fn roundtrip_placeholder_parameters() -> Result<()> {
+    use datafusion::logical_expr::expr::Placeholder;
+
+    let ctx = create_context().await?;
+
+    //TODO indexes change after deserialization. what is the best way to compare?
+    let plan = ctx.sql("SELECT * FROM data where a = $1 and f = $2 and c > $3").await?.into_optimized_plan()?;
+
+    let (proto, _) = to_substrait_plan(&plan, &ctx.state())?;
+    let plan2 = from_substrait_plan(&ctx.state(), &proto).await?;
+
+    let plan1str = format!("{plan}");
+    let plan2str = format!("{plan2}");
+    assert_eq!(plan1str, plan2str);
+
+    assert_eq!(plan.schema(), plan2.schema());
+
+    DataFrame::new(ctx.state(), plan2).show().await?;
+    Ok(())
+
+    // let plan = ctx.table("data").await?
+    //     .filter(col("a").eq(Expr::Placeholder(
+    //         Placeholder::new("$1".to_string(), Some(DataType::Int64)),
+    //     )))?
+    //     .filter(col("f").eq(Expr::Placeholder(
+    //         Placeholder::new("$2".to_string(), Some(DataType::Utf8)),
+    //     )))?
+    //     .filter(
+    //         col("c").gt(Expr::Placeholder(
+    //             Placeholder::new("$3".to_string(), Some(DataType::Date32)),
+    //         )),
+    //     )?
+    //     .logical_plan()
+    //
+    //     .clone();
+    //
+    // Perform roundtrip: LogicalPlan -> SubstraitPlan -> LogicalPlan
+    // roundtrip_logical_plan_with_ctx(plan, ctx).await?;
+    // Ok(())
 }
 
 fn check_post_join_filters(rel: &Rel) -> Result<()> {
@@ -1863,7 +1905,7 @@ async fn generate_plan_from_sql(
     } else {
         df.into_unoptimized_plan()
     };
-    let proto = to_substrait_plan(&plan, &ctx.state())?;
+    let (proto, _) = to_substrait_plan(&plan, &ctx.state())?;
     let plan2 = if optimized {
         let temp = from_substrait_plan(&ctx.state(), &proto).await?;
         ctx.state().optimize(&temp)?
@@ -1959,11 +2001,11 @@ async fn test_alias(sql_with_alias: &str, sql_no_alias: &str) -> Result<()> {
     let ctx = create_context().await?;
 
     let df_a = ctx.sql(sql_with_alias).await?;
-    let proto_a = to_substrait_plan(&df_a.into_optimized_plan()?, &ctx.state())?;
+    let (proto_a, _) = to_substrait_plan(&df_a.into_optimized_plan()?, &ctx.state())?;
     let plan_with_alias = from_substrait_plan(&ctx.state(), &proto_a).await?;
 
     let df = ctx.sql(sql_no_alias).await?;
-    let proto = to_substrait_plan(&df.into_optimized_plan()?, &ctx.state())?;
+    let (proto, _) = to_substrait_plan(&df.into_optimized_plan()?, &ctx.state())?;
     let plan = from_substrait_plan(&ctx.state(), &proto).await?;
 
     let plan1str = format!("{plan_with_alias}");
