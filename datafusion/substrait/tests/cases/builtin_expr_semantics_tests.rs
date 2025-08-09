@@ -55,7 +55,7 @@ mod tests {
         );
 
         // Test roundtrip semantics
-        let proto = to_substrait_plan(&plan, &ctx.state())?;
+        let (proto, _) = to_substrait_plan(&plan, &ctx.state())?;
         let plan2 = from_substrait_plan(&ctx.state(), &proto).await?;
         let df2 = DataFrame::new(ctx.state().clone(), plan2.clone());
         let results2 = df2.collect().await?;

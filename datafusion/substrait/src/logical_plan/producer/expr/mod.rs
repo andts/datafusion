@@ -21,7 +21,7 @@ mod field_reference;
 mod if_then;
 mod lambda;
 mod lambda_variable;
-mod literal;
+pub mod literal;
 mod placeholder;
 mod scalar_function;
 mod singular_or_list;

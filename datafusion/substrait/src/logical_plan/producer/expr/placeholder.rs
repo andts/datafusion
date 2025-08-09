@@ -16,53 +16,32 @@
 // under the License.
 
 use crate::logical_plan::producer::{SubstraitProducer, to_substrait_type};
-use datafusion::common::substrait_err;
-use datafusion::logical_expr::expr::Placeholder;
+use substrait::proto::Expression;
 use substrait::proto::expression::RexType;
-use substrait::proto::{DynamicParameter, Expression};
 
+/// Convert a registered DataFusion placeholder (named or positional) to a Substrait
+/// DynamicParameter. `id` is the Substrait parameter reference assigned by the producer's
+/// `register_dynamic_parameter`, and `data_type` is the resolved placeholder type.
 pub fn from_placeholder(
     producer: &mut impl SubstraitProducer,
-    placeholder: &Placeholder,
+    id: u32,
+    data_type: &Option<datafusion::arrow::datatypes::DataType>,
 ) -> datafusion::common::Result<Expression> {
-    let parameter_reference = parse_placeholder_index(&placeholder.id)?;
-
-    let r#type = placeholder
-        .field
-        .as_ref()
-        .map(|field| to_substrait_type(producer, field.data_type(), field.is_nullable()))
-        .transpose()?;
+    let output_type = match data_type {
+        Some(dt) => Some(to_substrait_type(producer, dt, true)?),
+        None => {
+            return datafusion::common::exec_err!(
+                "Dynamic parameter must have a data type specified: {id}"
+            );
+        }
+    };
 
     Ok(Expression {
-        rex_type: Some(RexType::DynamicParameter(DynamicParameter {
-            r#type,
-            parameter_reference,
-        })),
+        rex_type: Some(RexType::DynamicParameter(
+            substrait::proto::DynamicParameter {
+                r#type: output_type,
+                parameter_reference: id,
+            },
+        )),
     })
-}
-
-/// Converts a placeholder id like "$1" into a zero-based parameter index.
-/// Substrait uses zero-based `parameter_reference` while DataFusion uses
-/// one-based `$N` placeholder ids.
-fn parse_placeholder_index(id: &str) -> datafusion::common::Result<u32> {
-    let num_str = id.strip_prefix('$').unwrap_or(id);
-    match num_str.parse::<u32>() {
-        Ok(n) if n > 0 => Ok(n - 1),
-        Ok(_) => substrait_err!("Placeholder index must be >= 1, got: {id}"),
-        Err(_) => substrait_err!("Cannot parse placeholder id as numeric index: {id}"),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_parse_placeholder_index() {
-        assert_eq!(parse_placeholder_index("$1").unwrap(), 0);
-        assert_eq!(parse_placeholder_index("$2").unwrap(), 1);
-        assert_eq!(parse_placeholder_index("$100").unwrap(), 99);
-        assert!(parse_placeholder_index("$0").is_err());
-        assert!(parse_placeholder_index("$name").is_err());
-    }
 }

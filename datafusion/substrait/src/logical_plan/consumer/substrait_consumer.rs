@@ -16,7 +16,7 @@
 // under the License.
 
 use super::{
-    from_aggregate_rel, from_cast, from_cross_rel, from_exchange_rel, from_fetch_rel,
+    from_aggregate_rel, from_cast, from_cross_rel, from_dynamic_parameter, from_exchange_rel, from_fetch_rel,
     from_field_reference, from_filter_rel, from_if_then, from_join_rel, from_literal,
     from_nested, from_project_rel, from_read_rel, from_scalar_function, from_set_rel,
     from_singular_or_list, from_sort_rel, from_subquery, from_substrait_rel,
@@ -406,21 +406,9 @@ pub trait SubstraitConsumer: Send + Sync + Sized {
     async fn consume_dynamic_parameter(
         &self,
         expr: &DynamicParameter,
-        _input_schema: &DFSchema,
+        input_schema: &DFSchema,
     ) -> datafusion::common::Result<Expr> {
-        let id = format!("${}", expr.parameter_reference + 1);
-        let field = expr
-            .r#type
-            .as_ref()
-            .map(|t| {
-                super::from_substrait_type_without_names(self, t).map(|dt| {
-                    Arc::new(datafusion::arrow::datatypes::Field::new(&id, dt, true))
-                })
-            })
-            .transpose()?;
-        Ok(Expr::Placeholder(
-            datafusion::logical_expr::expr::Placeholder::new_with_field(id, field),
-        ))
+        from_dynamic_parameter(self, expr, input_schema).await
     }
 
     async fn consume_lambda(
