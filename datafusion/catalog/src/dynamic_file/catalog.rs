@@ -17,7 +17,7 @@
 
 //! [`DynamicFileCatalog`] that creates tables from file paths
 
-use crate::{CatalogProvider, CatalogProviderList, SchemaProvider, TableProvider};
+use crate::{CatalogProvider, CatalogProviderList, MemorySchemaProvider, SchemaProvider, TableProvider};
 use async_trait::async_trait;
 use std::any::Any;
 use std::fmt::Debug;
@@ -96,12 +96,14 @@ impl CatalogProvider for DynamicFileCatalogProvider {
     }
 
     fn schema(&self, name: &str) -> Option<Arc<dyn SchemaProvider>> {
-        self.inner.schema(name).map(|schema| {
-            Arc::new(DynamicFileSchemaProvider::new(
-                schema,
-                Arc::clone(&self.factory),
-            )) as _
-        })
+        self.inner.schema(name)
+            .or_else(|| Some(Arc::new(MemorySchemaProvider::new())))
+            .map(|schema| {
+                Arc::new(DynamicFileSchemaProvider::new(
+                    schema,
+                    Arc::clone(&self.factory),
+                )) as _
+            })
     }
 
     fn register_schema(
