@@ -26,7 +26,7 @@ pub fn from_ddl(
         advanced_extension: None,
     };
 
-    let table_schema = to_substrait_named_struct(input_rel.schema())?;
+    let table_schema = to_substrait_named_struct(producer, input_rel.schema())?;
 
     Ok(Box::new(Rel {
         rel_type: Some(RelType::Write(Box::new(WriteRel {

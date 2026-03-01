@@ -26,21 +26,21 @@ use crate::logical_plan::producer::{
     from_union, from_values, from_window, from_window_function, to_substrait_rel,
     to_substrait_rex,
 };
+use datafusion::arrow::datatypes::DataType;
 use datafusion::common::{Column, DFSchemaRef, ScalarValue, substrait_err};
 use datafusion::execution::SessionState;
 use datafusion::execution::registry::SerializerRegistry;
-use datafusion::arrow::datatypes::DataType;
 use datafusion::logical_expr::Subquery;
 use datafusion::logical_expr::expr::{
     Alias, Exists, InList, InSubquery, Placeholder, SetComparison, WindowFunction,
 };
-use std::collections::HashMap;
 use datafusion::logical_expr::{
-    Aggregate, Between, BinaryExpr, Case, Cast, DdlStatement, Distinct,
-    EmptyRelation, Expr, Extension, Filter, Join, Like, Limit, LogicalPlan, Projection,
-    Repartition, Sort, SubqueryAlias, TableScan, TryCast, Union, Values, Window,expr,
+    expr, Aggregate, Between, BinaryExpr, Case, Cast, DdlStatement,
+    Distinct, EmptyRelation, Expr, Extension, Filter, Join, Like, Limit, LogicalPlan,
+    Projection, Repartition, Sort, SubqueryAlias, TableScan, TryCast, Union, Values, Window,
 };
 use pbjson_types::Any as ProtoAny;
+use std::collections::HashMap;
 use substrait::proto::aggregate_rel::Measure;
 use substrait::proto::rel::RelType;
 use substrait::proto::{
