@@ -31,18 +31,18 @@ use datafusion::arrow::datatypes::FieldRef;
 use datafusion::common::{
     Column, DFSchemaRef, HashMap, ScalarValue, not_impl_err, substrait_err,
 };
+use datafusion::arrow::datatypes::DataType;
 use datafusion::execution::SessionState;
 use datafusion::execution::registry::SerializerRegistry;
-use datafusion::arrow::datatypes::DataType;
 use datafusion::logical_expr::Subquery;
 use datafusion::logical_expr::expr::{
     Alias, Exists, InList, InSubquery, Lambda, LambdaVariable, Placeholder,
     SetComparison, WindowFunction,
 };
 use datafusion::logical_expr::{
-    Aggregate, Between, BinaryExpr, Case, Cast, DdlStatement, Distinct,
-    EmptyRelation, Expr, Extension, Filter, Join, Like, Limit, LogicalPlan, Projection,
-    Repartition, Sort, SubqueryAlias, TableScan, TryCast, Union, Values, Window,expr,
+    expr, Aggregate, Between, BinaryExpr, Case, Cast, DdlStatement,
+    Distinct, EmptyRelation, Expr, Extension, Filter, Join, Like, Limit, LogicalPlan,
+    Projection, Repartition, Sort, SubqueryAlias, TableScan, TryCast, Union, Values, Window,
 };
 use pbjson_types::Any as ProtoAny;
 use substrait::proto::aggregate_rel::Measure;
