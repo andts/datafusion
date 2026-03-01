@@ -25,21 +25,20 @@ use crate::logical_plan::producer::{
     from_unary_expr, from_union, from_values, from_window, from_window_function,
     to_substrait_rel, to_substrait_rex,
 };
-use datafusion::common::{Column, DFSchemaRef, ScalarValue, substrait_err};
-use datafusion::execution::SessionState;
-use datafusion::execution::registry::SerializerRegistry;
-use datafusion::logical_expr::expr::{Alias, InList, InSubquery, WindowFunction};
 use datafusion::arrow::datatypes::DataType;
-use std::collections::HashMap;
+use datafusion::common::{substrait_err, Column, DFSchemaRef, ScalarValue};
+use datafusion::execution::registry::SerializerRegistry;
+use datafusion::execution::SessionState;
 use datafusion::logical_expr::expr::{
     Alias, InList, InSubquery, Placeholder, WindowFunction,
 };
 use datafusion::logical_expr::{
-    Aggregate, Between, BinaryExpr, Case, Cast, DdlStatement, Distinct,
-    EmptyRelation, Expr, Extension, Filter, Join, Like, Limit, LogicalPlan, Projection,
-    Repartition, Sort, SubqueryAlias, TableScan, TryCast, Union, Values, Window,expr,
+    expr, Aggregate, Between, BinaryExpr, Case, Cast, DdlStatement,
+    Distinct, EmptyRelation, Expr, Extension, Filter, Join, Like, Limit, LogicalPlan,
+    Projection, Repartition, Sort, SubqueryAlias, TableScan, TryCast, Union, Values, Window,
 };
 use pbjson_types::Any as ProtoAny;
+use std::collections::HashMap;
 use substrait::proto::aggregate_rel::Measure;
 use substrait::proto::rel::RelType;
 use substrait::proto::{
@@ -408,8 +407,9 @@ pub trait SubstraitProducer: Send + Sync + Sized {
         &mut self,
         placeholder: &Placeholder,
     ) -> datafusion::common::Result<Expression> {
-        let parameter_id = self.register_dynamic_parameter(&placeholder.id, &placeholder.data_type)?;
-        from_placeholder(parameter_id, &placeholder.data_type)
+        let data_type_opt = placeholder.field.as_ref().map(|f| f.data_type().clone());
+        let parameter_id = self.register_dynamic_parameter(&placeholder.id, &data_type_opt)?;
+        from_placeholder(self, parameter_id, &data_type_opt)
     }
 }
 

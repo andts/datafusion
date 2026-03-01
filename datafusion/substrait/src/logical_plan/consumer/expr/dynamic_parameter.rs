@@ -15,7 +15,9 @@
 // specific language governing permissions and limitations
 // under the License.
 
-use crate::logical_plan::consumer::{from_substrait_type_without_names, SubstraitConsumer};
+use crate::logical_plan::consumer::{
+    SubstraitConsumer, from_substrait_type_without_names,
+};
 use datafusion::common::DFSchema;
 use datafusion::logical_expr::{Expr, expr::Placeholder};
 use substrait::proto::DynamicParameter;
@@ -33,8 +35,8 @@ pub async fn from_dynamic_parameter(
         None => None,
     };
 
-    Ok(Expr::Placeholder(Placeholder {
-        id: format!("${}", expr.parameter_reference),
+    Ok(Expr::Placeholder(Placeholder::new(
+        format!("${}", expr.parameter_reference),
         data_type,
-    }))
+    )))
 }

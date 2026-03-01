@@ -15,17 +15,18 @@
 // specific language governing permissions and limitations
 // under the License.
 
-use crate::logical_plan::producer::to_substrait_type;
+use crate::logical_plan::producer::{to_substrait_type, SubstraitProducer};
 use substrait::proto::expression::RexType;
 use substrait::proto::Expression;
 
 /// Convert DataFusion Placeholder to Substrait DynamicParameter
 pub fn from_placeholder(
+    producer: &mut impl SubstraitProducer,
     id: u32,
     data_type: &Option<datafusion::arrow::datatypes::DataType>,
 ) -> datafusion::common::Result<Expression> {
     let output_type = match data_type {
-        Some(dt) => Some(to_substrait_type(dt, true)?),
+        Some(dt) => Some(to_substrait_type(producer, dt, true)?),
         None => {
             return datafusion::common::exec_err!(
                 "Dynamic parameter must have a data type specified: {id}"
