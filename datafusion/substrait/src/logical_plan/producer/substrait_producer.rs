@@ -27,11 +27,11 @@ use crate::logical_plan::producer::{
     from_window, from_window_function, to_substrait_rel, to_substrait_rex,
     to_substrait_type_from_field,
 };
+use datafusion::arrow::datatypes::DataType;
 use datafusion::arrow::datatypes::FieldRef;
 use datafusion::common::{
     Column, DFSchemaRef, HashMap, ScalarValue, not_impl_err, substrait_err,
 };
-use datafusion::arrow::datatypes::DataType;
 use datafusion::execution::SessionState;
 use datafusion::execution::registry::SerializerRegistry;
 use datafusion::logical_expr::Subquery;
@@ -40,9 +40,9 @@ use datafusion::logical_expr::expr::{
     SetComparison, WindowFunction,
 };
 use datafusion::logical_expr::{
-    expr, Aggregate, Between, BinaryExpr, Case, Cast, DdlStatement,
-    Distinct, EmptyRelation, Expr, Extension, Filter, Join, Like, Limit, LogicalPlan,
-    Projection, Repartition, Sort, SubqueryAlias, TableScan, TryCast, Union, Values, Window,
+    Aggregate, Between, BinaryExpr, Case, Cast, DdlStatement, Distinct, EmptyRelation,
+    Expr, Extension, Filter, Join, Like, Limit, LogicalPlan, Projection, Repartition,
+    Sort, SubqueryAlias, TableScan, TryCast, Union, Values, Window, expr,
 };
 use pbjson_types::Any as ProtoAny;
 use substrait::proto::aggregate_rel::Measure;
@@ -597,10 +597,8 @@ impl SubstraitProducer for DefaultSubstraitProducer<'_> {
             None => {
                 // Register new parameter
                 let parameter_id = self.next_parameter_id;
-                self.dynamic_parameters.insert(
-                    identifier.to_string(),
-                    (parameter_id, data_type.clone()),
-                );
+                self.dynamic_parameters
+                    .insert(identifier.to_string(), (parameter_id, data_type.clone()));
                 self.next_parameter_id += 1;
                 Ok(parameter_id)
             }

@@ -229,7 +229,7 @@ async fn roundtrip_subquery_with_empty_relation() -> Result<()> {
     let plan = df.into_optimized_plan()?;
 
     // Just verify the round-trip succeeds and produces valid results
-    let proto = to_substrait_plan(&plan, &ctx.state())?;
+    let (proto, _) = to_substrait_plan(&plan, &ctx.state())?;
     let plan2 = from_substrait_plan(&ctx.state(), &proto).await?;
     let df2 = DataFrame::new(ctx.state(), plan2);
     df2.show().await?;
@@ -504,7 +504,7 @@ async fn test_substrait_to_df_name_mapping(
     let ctx = create_context().await?;
     let df = ctx.sql(sql).await?;
     let plan = df.into_optimized_plan()?;
-    let proto = to_substrait_plan(&plan, &ctx.state())?;
+    let (proto, _) = to_substrait_plan(&plan, &ctx.state())?;
 
     let function_name = match proto.extensions[0].mapping_type.as_ref().unwrap() {
         MappingType::ExtensionFunction(ext_f) => &ext_f.name,
@@ -702,7 +702,7 @@ async fn roundtrip_exists_filter() -> Result<()> {
 async fn roundtrip_set_comparison_any_substrait() -> Result<()> {
     let ctx = create_context().await?;
     let plan = build_set_comparison_plan(&ctx, SetQuantifier::Any, Operator::Gt).await?;
-    let proto = to_substrait_plan(&plan, &ctx.state())?;
+    let (proto, _) = to_substrait_plan(&plan, &ctx.state())?;
     let roundtrip_plan = from_substrait_plan(&ctx.state(), &proto).await?;
     assert_set_comparison_predicate(&roundtrip_plan, Operator::Gt, SetQuantifier::Any);
     Ok(())
@@ -714,7 +714,7 @@ async fn roundtrip_set_comparison_all_substrait() -> Result<()> {
     let ctx = create_context().await?;
     let plan =
         build_set_comparison_plan(&ctx, SetQuantifier::All, Operator::NotEq).await?;
-    let proto = to_substrait_plan(&plan, &ctx.state())?;
+    let (proto, _) = to_substrait_plan(&plan, &ctx.state())?;
     let roundtrip_plan = from_substrait_plan(&ctx.state(), &proto).await?;
     assert_set_comparison_predicate(&roundtrip_plan, Operator::NotEq, SetQuantifier::All);
     Ok(())
@@ -724,7 +724,7 @@ async fn roundtrip_set_comparison_all_substrait() -> Result<()> {
 async fn roundtrip_scalar_subquery_substrait() -> Result<()> {
     let ctx = create_context().await?;
     let plan = build_scalar_subquery_projection_plan(&ctx).await?;
-    let proto = to_substrait_plan(&plan, &ctx.state())?;
+    let (proto, _) = to_substrait_plan(&plan, &ctx.state())?;
     assert_root_project_has_scalar_subquery(proto.as_ref());
     let roundtrip_plan = from_substrait_plan(&ctx.state(), &proto).await?;
     assert_projection_contains_scalar_subquery(&roundtrip_plan);
@@ -735,7 +735,7 @@ async fn roundtrip_scalar_subquery_substrait() -> Result<()> {
 async fn roundtrip_exists_substrait() -> Result<()> {
     let ctx = create_context().await?;
     let plan = build_exists_filter_plan(&ctx, false).await?;
-    let proto = to_substrait_plan(&plan, &ctx.state())?;
+    let (proto, _) = to_substrait_plan(&plan, &ctx.state())?;
     let roundtrip_plan = from_substrait_plan(&ctx.state(), &proto).await?;
     assert_exists_predicate(&roundtrip_plan, false);
     Ok(())
@@ -745,7 +745,7 @@ async fn roundtrip_exists_substrait() -> Result<()> {
 async fn roundtrip_not_exists_substrait() -> Result<()> {
     let ctx = create_context().await?;
     let plan = build_exists_filter_plan(&ctx, true).await?;
-    let proto = to_substrait_plan(&plan, &ctx.state())?;
+    let (proto, _) = to_substrait_plan(&plan, &ctx.state())?;
     let roundtrip_plan = from_substrait_plan(&ctx.state(), &proto).await?;
     assert_exists_predicate(&roundtrip_plan, true);
     Ok(())
@@ -1637,7 +1637,7 @@ async fn roundtrip_preserves_field_nullability() -> Result<()> {
         schema: DFSchemaRef::new(df_schema),
     });
 
-    let proto = to_substrait_plan(&plan, &ctx.state())?;
+    let (proto, _) = to_substrait_plan(&plan, &ctx.state())?;
     let plan2 = from_substrait_plan(&ctx.state(), &proto).await?;
 
     assert_eq!(plan.schema(), plan2.schema());
@@ -2485,7 +2485,7 @@ async fn substrait_roundtrip(
     plan: &LogicalPlan,
     ctx: &SessionContext,
 ) -> Result<LogicalPlan> {
-    let proto = to_substrait_plan(plan, &ctx.state())?;
+    let (proto, _) = to_substrait_plan(plan, &ctx.state())?;
     let plan2 = from_substrait_plan(&ctx.state(), &proto).await?;
     let plan2 = ctx.state().optimize(&plan2)?;
     Ok(plan2)
@@ -2517,7 +2517,7 @@ async fn roundtrip_logical_plan_with_ctx(
     plan: LogicalPlan,
     ctx: SessionContext,
 ) -> Result<Box<Plan>> {
-    let proto = to_substrait_plan(&plan, &ctx.state())?;
+    let (proto, _) = to_substrait_plan(&plan, &ctx.state())?;
     let plan2 = substrait_roundtrip(&plan, &ctx).await?;
 
     let plan1str = format!("{plan}");

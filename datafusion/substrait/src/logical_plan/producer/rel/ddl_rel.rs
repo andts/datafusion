@@ -1,12 +1,11 @@
-use substrait::proto::{NamedObjectWrite, Rel, RelCommon, WriteRel};
+use crate::logical_plan::producer::{SubstraitProducer, to_substrait_named_struct};
+use datafusion::common::not_impl_err;
+use datafusion::logical_expr::DdlStatement;
 use substrait::proto::ddl_rel::DdlOp;
 use substrait::proto::rel::RelType;
 use substrait::proto::rel_common::{Direct, EmitKind};
 use substrait::proto::write_rel::{CreateMode, OutputMode, WriteType};
-use datafusion::common::not_impl_err;
-use datafusion::logical_expr::DdlStatement;
-use crate::logical_plan::producer::{to_substrait_named_struct, SubstraitProducer};
-
+use substrait::proto::{NamedObjectWrite, Rel, RelCommon, WriteRel};
 
 /// Convert CTAS to corresponding Substrait WriteRel
 pub fn from_ddl(
@@ -18,7 +17,7 @@ pub fn from_ddl(
     };
 
     let input_rel = create_memory_table.input.as_ref();
-    let input_substrait_rel = producer.handle_plan(&input_rel)?;
+    let input_substrait_rel = producer.handle_plan(input_rel)?;
 
     let common = RelCommon {
         emit_kind: Some(EmitKind::Direct(Direct {})),

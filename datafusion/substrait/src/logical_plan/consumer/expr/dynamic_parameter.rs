@@ -15,7 +15,9 @@
 // specific language governing permissions and limitations
 // under the License.
 
-use crate::logical_plan::consumer::{SubstraitConsumer, from_substrait_type_without_names};
+use crate::logical_plan::consumer::{
+    SubstraitConsumer, from_substrait_type_without_names,
+};
 use datafusion::arrow::datatypes::Field;
 use datafusion::common::DFSchema;
 use datafusion::logical_expr::{Expr, expr::Placeholder};
