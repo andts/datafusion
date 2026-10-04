@@ -25,6 +25,7 @@ use super::{
 use arrow::array::RecordBatch;
 use arrow::datatypes::Fields;
 use datafusion::arrow::compute::kernels::sort::SortOptions;
+use datafusion::arrow::datatypes::FieldRef;
 use datafusion::arrow::datatypes::SchemaRef;
 use datafusion::arrow::datatypes::{DataType, Field, Schema};
 use datafusion::assert_batches_eq;
@@ -42,12 +43,14 @@ use datafusion::datasource::physical_plan::{
 use datafusion::datasource::source::DataSourceExec;
 use datafusion::execution::TaskContext;
 use datafusion::logical_expr::Operator;
+use datafusion::parquet::arrow::RowNumber;
 use datafusion::physical_expr::LexOrdering;
 use datafusion::physical_expr_adapter::{
     DefaultPhysicalExprAdapterFactory, PhysicalExprAdapter, PhysicalExprAdapterFactory,
     replace_columns_with_literals,
 };
 use datafusion::physical_plan::collect;
+use datafusion::physical_plan::expressions::in_list;
 use datafusion::physical_plan::expressions::{
     BinaryExpr, Column, PhysicalSortExpr, col, lit,
 };
@@ -978,5 +981,58 @@ async fn roundtrip_listing_table_preserves_expr_adapter_factory_semantics() -> R
     ];
     assert_batches_eq!(expected, &collect(plan, ctx.task_ctx()).await?);
     assert_batches_eq!(expected, &collect(decoded, ctx.task_ctx()).await?);
+    Ok(())
+}
+
+/// A Parquet scan with an explicit `RowNumber` virtual column round-trips: the
+/// virtual column (extension type included), the projection that selects it and
+/// a predicate over it all survive. `InList` checks its column's type against the
+/// decode schema, so the predicate only decodes if that schema has the virtual
+/// column.
+#[test]
+fn roundtrip_parquet_exec_with_virtual_column() -> Result<()> {
+    let file_schema =
+        Arc::new(Schema::new(vec![Field::new("col", DataType::Utf8, false)]));
+    let row_idx: FieldRef = Arc::new(
+        Field::new("row_idx", DataType::Int64, false).with_extension_type(RowNumber),
+    );
+    let table_schema = TableSchemaBuilder::from(&file_schema)
+        .with_table_partition_cols(vec![Arc::new(Field::new(
+            "part",
+            DataType::Utf8,
+            false,
+        ))])
+        .with_virtual_columns(vec![Arc::clone(&row_idx)])
+        .build();
+
+    let predicate = in_list(
+        col("row_idx", table_schema.table_schema())?,
+        vec![lit(1i64), lit(2i64)],
+        &false,
+        table_schema.table_schema(),
+    )?;
+    let file_source =
+        Arc::new(ParquetSource::new(table_schema.clone()).with_predicate(predicate));
+
+    // Table schema: col (0), part (1), row_idx (2).
+    let scan_config =
+        FileScanConfigBuilder::new(ObjectStoreUrl::local_filesystem(), file_source)
+            .with_projection_indices(Some(vec![0, 2]))?
+            .with_file_group(FileGroup::new(vec![
+                PartitionedFile::new("/path/to/part=a/file.parquet".to_string(), 1024)
+                    .with_partition_values(vec![ScalarValue::Utf8(Some(
+                        "a".to_string(),
+                    ))]),
+            ]))
+            .build();
+    let expected_schema = scan_config.projected_schema()?;
+
+    let decoded = roundtrip_file_scan_config(scan_config)?;
+    assert_eq!(
+        decoded.file_source().table_schema().virtual_columns(),
+        &Fields::from(vec![row_idx])
+    );
+    // Field equality includes metadata, so this also checks the extension type.
+    assert_eq!(decoded.projected_schema()?, expected_schema);
     Ok(())
 }

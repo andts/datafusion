@@ -1148,9 +1148,12 @@ impl ParquetSource {
                 .try_into()?,
         );
 
-        // The predicate was serialized against the scan's output schema, so it
-        // must be decoded against the projected schema when a projection is
-        // present.
+        let table_schema = FileScanConfig::parse_table_schema_from_proto(base_conf)?;
+
+        // The predicate was serialized against the scan's full table schema
+        // (file, partition, then virtual columns). Plans from older writers may
+        // instead carry a legacy `projection`, in which case the predicate was
+        // serialized against that projection of `schema`.
         let predicate_schema = if !base_conf.projection.is_empty() {
             let projected_fields: Vec<_> = base_conf
                 .projection
@@ -1159,7 +1162,7 @@ impl ParquetSource {
                 .collect();
             Arc::new(Schema::new(projected_fields))
         } else {
-            schema
+            Arc::clone(table_schema.table_schema())
         };
 
         let predicate = scan
@@ -1173,7 +1176,6 @@ impl ParquetSource {
             options = table_options.try_into()?;
         }
 
-        let table_schema = FileScanConfig::parse_table_schema_from_proto(base_conf)?;
         let object_store_url = match base_conf.object_store_url.is_empty() {
             false => ObjectStoreUrl::parse(&base_conf.object_store_url)?,
             true => ObjectStoreUrl::local_filesystem(),
