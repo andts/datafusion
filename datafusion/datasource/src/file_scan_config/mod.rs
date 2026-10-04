@@ -1767,6 +1767,13 @@ mod tests {
         fn encode_udwf(&self, _udwf: &WindowUDF) -> Result<Option<Vec<u8>>> {
             internal_err!("not needed for proto delegation test")
         }
+
+        fn encode_expr_adapter_factory(
+            &self,
+            _factory: &Arc<dyn PhysicalExprAdapterFactory>,
+        ) -> Result<Vec<u8>> {
+            internal_err!("not needed for proto delegation test")
+        }
     }
 
     #[cfg(feature = "proto")]

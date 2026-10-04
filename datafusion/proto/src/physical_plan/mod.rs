@@ -43,6 +43,7 @@ use datafusion_expr::{AggregateUDF, HigherOrderUDF, ScalarUDF, WindowUDF};
 use datafusion_functions_table::generate_series::{
     Empty, GenSeriesArgs, GenerateSeriesTable, GenericSeriesState, TimestampValue,
 };
+use datafusion_physical_expr_adapter::PhysicalExprAdapterFactory;
 use datafusion_physical_expr_common::physical_expr::proto_decode::PhysicalExprDecodeCtx;
 use datafusion_physical_expr_common::physical_expr::proto_encode::PhysicalExprEncodeCtx;
 use datafusion_physical_plan::aggregates::AggregateExec;
@@ -119,6 +120,10 @@ mod file_scan_config_serde {
     };
     use datafusion_physical_expr::{
         LexOrdering, Partitioning, PhysicalSortExpr, RangePartitioning, SplitPoint,
+    };
+    use datafusion_physical_expr_adapter::{
+        DefaultPhysicalExprAdapterFactory, PhysicalExprAdapter,
+        PhysicalExprAdapterFactory,
     };
     use datafusion_physical_plan::metrics::ExecutionPlanMetricsSet;
     use object_store::ObjectStore;
@@ -494,6 +499,135 @@ mod file_scan_config_serde {
             "unexpected error: {err}"
         );
 
+        Ok(())
+    }
+
+    /// A stateful custom adapter factory: `tag` must survive a round trip.
+    #[derive(Debug)]
+    struct TaggedAdapterFactory {
+        tag: String,
+    }
+
+    impl PhysicalExprAdapterFactory for TaggedAdapterFactory {
+        fn create(
+            &self,
+            logical_file_schema: SchemaRef,
+            physical_file_schema: SchemaRef,
+        ) -> Result<Arc<dyn PhysicalExprAdapter>> {
+            DefaultPhysicalExprAdapterFactory
+                .create(logical_file_schema, physical_file_schema)
+        }
+    }
+
+    /// Serializes [`TaggedAdapterFactory`] as its UTF-8 tag; rejects every other
+    /// factory with `NotImplemented` so composed codecs can move on.
+    #[derive(Debug)]
+    struct TaggedAdapterCodec;
+
+    impl PhysicalExtensionCodec for TaggedAdapterCodec {
+        fn try_decode(
+            &self,
+            _buf: &[u8],
+            _inputs: &[Arc<dyn ExecutionPlan>],
+            _ctx: &TaskContext,
+            _proto_converter: &dyn PhysicalProtoConverterExtension,
+        ) -> Result<Arc<dyn ExecutionPlan>> {
+            internal_err!("not needed for these tests")
+        }
+
+        fn try_encode(
+            &self,
+            _node: Arc<dyn ExecutionPlan>,
+            _buf: &mut Vec<u8>,
+            _proto_converter: &dyn PhysicalProtoConverterExtension,
+        ) -> Result<()> {
+            internal_err!("not needed for these tests")
+        }
+
+        fn try_encode_expr_adapter_factory(
+            &self,
+            factory: &Arc<dyn PhysicalExprAdapterFactory>,
+            buf: &mut Vec<u8>,
+        ) -> Result<()> {
+            let Some(tagged) = factory.downcast_ref::<TaggedAdapterFactory>() else {
+                return not_impl_err!(
+                    "TaggedAdapterCodec only encodes TaggedAdapterFactory"
+                );
+            };
+            buf.extend_from_slice(tagged.tag.as_bytes());
+            Ok(())
+        }
+
+        fn try_decode_expr_adapter_factory(
+            &self,
+            buf: &[u8],
+        ) -> Result<Arc<dyn PhysicalExprAdapterFactory>> {
+            let tag = String::from_utf8(buf.to_vec())
+                .map_err(|e| internal_datafusion_err!("invalid tag: {e}"))?;
+            Ok(Arc::new(TaggedAdapterFactory { tag }))
+        }
+    }
+
+    fn tagged_factory(tag: &str) -> Arc<dyn PhysicalExprAdapterFactory> {
+        Arc::new(TaggedAdapterFactory {
+            tag: tag.to_string(),
+        })
+    }
+
+    fn tag_of(factory: &Arc<dyn PhysicalExprAdapterFactory>) -> &str {
+        &factory
+            .downcast_ref::<TaggedAdapterFactory>()
+            .expect("expected a TaggedAdapterFactory")
+            .tag
+    }
+
+    #[test]
+    fn plan_ctx_routes_expr_adapter_factory_through_codec() -> Result<()> {
+        let codec = TaggedAdapterCodec;
+        let converter = DefaultPhysicalProtoConverter {};
+        let encoder = ConverterPlanEncoder {
+            codec: &codec,
+            proto_converter: &converter,
+        };
+        let payload = ExecutionPlanEncodeCtx::new(&encoder)
+            .encode_expr_adapter_factory(&tagged_factory("v1"))?;
+        assert_eq!(payload, b"v1");
+
+        let task_ctx = TaskContext::default();
+        let decode_ctx = PhysicalPlanDecodeContext::new(&task_ctx, &codec);
+        let decoder = ConverterPlanDecoder {
+            ctx: &decode_ctx,
+            proto_converter: &converter,
+        };
+        let decoded = ExecutionPlanDecodeCtx::new(&decoder)
+            .decode_expr_adapter_factory(&payload)?;
+        assert_eq!(tag_of(&decoded), "v1");
+        Ok(())
+    }
+
+    #[test]
+    fn default_codec_does_not_handle_expr_adapter_factory() {
+        let codec = DefaultPhysicalExtensionCodec {};
+        let err = codec
+            .try_encode_expr_adapter_factory(&tagged_factory("v1"), &mut vec![])
+            .expect_err("default codec must not encode custom factories");
+        assert!(matches!(err, DataFusionError::NotImplemented(_)), "{err}");
+        let err = codec
+            .try_decode_expr_adapter_factory(b"v1")
+            .expect_err("default codec must not decode custom factories");
+        assert!(matches!(err, DataFusionError::NotImplemented(_)), "{err}");
+    }
+
+    #[test]
+    fn composed_codec_routes_expr_adapter_factory_to_handling_codec() -> Result<()> {
+        let composed = ComposedPhysicalExtensionCodec::new(vec![
+            Arc::new(DefaultPhysicalExtensionCodec {}),
+            Arc::new(TaggedAdapterCodec),
+        ]);
+        let mut buf = vec![];
+        composed.try_encode_expr_adapter_factory(&tagged_factory("v2"), &mut buf)?;
+        let decoded = composed.try_decode_expr_adapter_factory(&buf)?;
+        assert_eq!(tag_of(&decoded), "v2");
         Ok(())
     }
 }
@@ -1633,6 +1767,31 @@ pub trait PhysicalExtensionCodec: Debug + Send + Sync + Any {
     fn try_encode_udwf(&self, _node: &WindowUDF, _buf: &mut Vec<u8>) -> Result<()> {
         Ok(())
     }
+
+    /// Serialize a custom [`PhysicalExprAdapterFactory`] attached to a file
+    /// scan (`FileScanConfig::expr_adapter_factory`) into `buf`.
+    ///
+    /// Return an error (typically `not_impl_err!`) for factories this codec
+    /// does not handle; [`ComposedPhysicalExtensionCodec`] then tries the next
+    /// codec. If no codec handles a custom factory, serializing the plan
+    /// fails rather than silently dropping it. DataFusion's
+    /// `DefaultPhysicalExprAdapterFactory` is serialized without a codec.
+    fn try_encode_expr_adapter_factory(
+        &self,
+        _factory: &Arc<dyn PhysicalExprAdapterFactory>,
+        _buf: &mut Vec<u8>,
+    ) -> Result<()> {
+        not_impl_err!("PhysicalExtensionCodec does not encode PhysicalExprAdapterFactory")
+    }
+
+    /// Reconstruct a factory serialized by
+    /// [`Self::try_encode_expr_adapter_factory`].
+    fn try_decode_expr_adapter_factory(
+        &self,
+        _buf: &[u8],
+    ) -> Result<Arc<dyn PhysicalExprAdapterFactory>> {
+        not_impl_err!("PhysicalExtensionCodec does not decode PhysicalExprAdapterFactory")
+    }
 }
 
 #[derive(Debug)]
@@ -2010,6 +2169,25 @@ impl PhysicalExtensionCodec for ComposedPhysicalExtensionCodec {
     fn try_encode_udaf(&self, node: &AggregateUDF, buf: &mut Vec<u8>) -> Result<()> {
         self.encode_protobuf(buf, |codec, data| codec.try_encode_udaf(node, data))
     }
+
+    fn try_encode_expr_adapter_factory(
+        &self,
+        factory: &Arc<dyn PhysicalExprAdapterFactory>,
+        buf: &mut Vec<u8>,
+    ) -> Result<()> {
+        self.encode_protobuf(buf, |codec, data| {
+            codec.try_encode_expr_adapter_factory(factory, data)
+        })
+    }
+
+    fn try_decode_expr_adapter_factory(
+        &self,
+        buf: &[u8],
+    ) -> Result<Arc<dyn PhysicalExprAdapterFactory>> {
+        self.decode_protobuf(buf, |codec, data| {
+            codec.try_decode_expr_adapter_factory(data)
+        })
+    }
 }
 
 /// Adapter backing [`ExecutionPlanEncodeCtx`] for plans migrated to the
@@ -2055,6 +2233,16 @@ impl ExecutionPlanEncode for ConverterPlanEncoder<'_> {
         let mut buf = vec![];
         self.codec.try_encode_udwf(udwf, &mut buf)?;
         Ok((!buf.is_empty()).then_some(buf))
+    }
+
+    fn encode_expr_adapter_factory(
+        &self,
+        factory: &Arc<dyn PhysicalExprAdapterFactory>,
+    ) -> Result<Vec<u8>> {
+        let mut buf = vec![];
+        self.codec
+            .try_encode_expr_adapter_factory(factory, &mut buf)?;
+        Ok(buf)
     }
 }
 
@@ -2136,5 +2324,12 @@ impl ExecutionPlanDecode for ConverterPlanDecoder<'_, '_> {
                 .udwf(name)
                 .or_else(|_| self.ctx.codec().try_decode_udwf(name, &[])),
         }
+    }
+
+    fn decode_expr_adapter_factory(
+        &self,
+        payload: &[u8],
+    ) -> Result<Arc<dyn PhysicalExprAdapterFactory>> {
+        self.ctx.codec().try_decode_expr_adapter_factory(payload)
     }
 }
