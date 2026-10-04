@@ -28,7 +28,7 @@
 //! - `all` — run all examples included in this module
 //!
 //! - `adapter_serialization`  
-//!   (file: adapter_serialization.rs, desc: Preserve custom PhysicalExprAdapter information during plan serialization using PhysicalExtensionCodec interception)
+//!   (file: adapter_serialization.rs, desc: Preserve a custom PhysicalExprAdapterFactory during plan serialization with PhysicalExtensionCodec hooks)
 //!
 //! - `csv_json_opener`  
 //!   (file: csv_json_opener.rs, desc: Use low-level FileOpener APIs for CSV/JSON)

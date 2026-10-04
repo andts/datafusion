@@ -17,33 +17,35 @@
 
 //! See `main.rs` for how to run it.
 //!
-//! This example demonstrates how to use the `PhysicalProtoConverterExtension`
-//! trait's interception methods (`execution_plan_to_proto` and
-//! `proto_to_execution_plan`) to implement custom serialization logic.
+//! This example shows how to keep a custom [`PhysicalExprAdapterFactory`]
+//! attached to a file scan when a physical plan is serialized with
+//! `datafusion-proto`.
 //!
-//! The key insight is that `FileScanConfig::expr_adapter_factory` is NOT serialized by
-//! default. This example shows how to:
-//! 1. Detect plans with custom adapters during serialization
-//! 2. Wrap them as Extension nodes with JSON-serialized adapter metadata
-//! 3. Store the inner DataSourceExec (without adapter) as a child in the extension's inputs field
-//! 4. Unwrap and restore the adapter during deserialization
+//! A `PhysicalExprAdapterFactory` decides how each file's physical schema is
+//! mapped onto the table schema, so it is part of the scan's semantics.
+//! DataFusion's `DefaultPhysicalExprAdapterFactory` round-trips on its own; a
+//! custom factory is serialized by a [`PhysicalExtensionCodec`] implementing
+//! `try_encode_expr_adapter_factory` / `try_decode_expr_adapter_factory`.
+//! Serializing a plan whose custom factory no codec handles is an error,
+//! rather than silently dropping the factory.
 //!
-//! This demonstrates nested serialization (protobuf outer, JSON inner) and the
-//! power of `PhysicalProtoConverterExtension`. Both plan and expression
-//! serialization route through converter hooks, enabling interception at every
-//! node in the tree.
+//! The example:
+//! 1. Registers a table whose scans use a custom, stateful adapter factory
+//! 2. Shows that serializing without a codec for that factory fails
+//! 3. Round-trips the plan with `AdapterCodec`
+//! 4. Checks the factory and its state survived, and that both plans return
+//!    the same rows
 
-use std::fmt::Debug;
 use std::sync::Arc;
 
 use arrow::array::record_batch;
 use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use datafusion::assert_batches_eq;
-use datafusion::common::{Result, not_impl_err};
+use datafusion::common::{Result, internal_datafusion_err, not_impl_err};
 use datafusion::datasource::listing::{
     ListingTable, ListingTableConfig, ListingTableConfigExt, ListingTableUrl,
 };
-use datafusion::datasource::physical_plan::{FileScanConfig, FileScanConfigBuilder};
+use datafusion::datasource::physical_plan::FileScanConfig;
 use datafusion::datasource::source::DataSourceExec;
 use datafusion::execution::TaskContext;
 use datafusion::execution::context::SessionContext;
@@ -56,43 +58,30 @@ use datafusion_physical_expr_adapter::{
     DefaultPhysicalExprAdapterFactory, PhysicalExprAdapter, PhysicalExprAdapterFactory,
 };
 use datafusion_proto::bytes::{
-    physical_plan_from_bytes_with_proto_converter,
-    physical_plan_to_bytes_with_proto_converter,
+    physical_plan_from_bytes_with_extension_codec,
+    physical_plan_to_bytes_with_extension_codec,
 };
-use datafusion_proto::physical_plan::from_proto::parse_physical_expr_with_converter;
-use datafusion_proto::physical_plan::to_proto::serialize_physical_expr_with_converter;
 use datafusion_proto::physical_plan::{
-    PhysicalExtensionCodec, PhysicalPlanDecodeContext, PhysicalPlanNodeExt,
+    DefaultPhysicalExtensionCodec, PhysicalExtensionCodec,
     PhysicalProtoConverterExtension,
-};
-use datafusion_proto::protobuf::physical_plan_node::PhysicalPlanType;
-use datafusion_proto::protobuf::{
-    PhysicalExprNode, PhysicalExtensionNode, PhysicalPlanNode,
 };
 use object_store::memory::InMemory;
 use object_store::path::Path;
 use object_store::{ObjectStore, ObjectStoreExt, PutPayload};
-use serde::{Deserialize, Serialize};
 
-/// Example showing how to preserve custom adapter information during plan serialization.
-///
-/// This demonstrates:
-/// 1. Creating a custom PhysicalExprAdapter with metadata
-/// 2. Using PhysicalExtensionCodec to intercept serialization
-/// 3. Wrapping adapter info as Extension nodes
-/// 4. Restoring adapters during deserialization
+/// Example showing how to serialize a custom `PhysicalExprAdapterFactory`
+/// with a `PhysicalExtensionCodec`.
 pub async fn adapter_serialization() -> Result<()> {
-    println!("=== PhysicalExprAdapter Serialization Example ===\n");
+    println!("=== PhysicalExprAdapterFactory Serialization Example ===\n");
 
     // Step 1: Create sample Parquet data in memory
     println!("Step 1: Creating sample Parquet data...");
     let store = Arc::new(InMemory::new()) as Arc<dyn ObjectStore>;
     let batch = record_batch!(("id", Int32, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]))?;
-    let path = Path::from("data.parquet");
-    write_parquet(&store, &path, &batch).await?;
+    write_parquet(&store, &Path::from("data.parquet"), &batch).await?;
 
-    // Step 2: Set up session with custom adapter
-    println!("Step 2: Setting up session with custom adapter...");
+    // Step 2: Register a table whose scans use MetadataAdapterFactory
+    println!("Step 2: Setting up session with custom adapter factory...");
     let logical_schema =
         Arc::new(Schema::new(vec![Field::new("id", DataType::Int32, false)]));
 
@@ -104,50 +93,49 @@ pub async fn adapter_serialization() -> Result<()> {
         Arc::clone(&store),
     );
 
-    // Create a table with our custom MetadataAdapterFactory
-    let adapter_factory = Arc::new(MetadataAdapterFactory::new("v1"));
     let listing_config =
         ListingTableConfig::new(ListingTableUrl::parse("memory:///data.parquet")?)
             .infer_options(&ctx.state())
             .await?
             .with_schema(logical_schema)
-            .with_expr_adapter_factory(
-                Arc::clone(&adapter_factory) as Arc<dyn PhysicalExprAdapterFactory>
-            );
-    let table = ListingTable::try_new(listing_config)?;
-    ctx.register_table("my_table", Arc::new(table))?;
+            .with_expr_adapter_factory(Arc::new(MetadataAdapterFactory::new("v1")));
+    ctx.register_table("my_table", Arc::new(ListingTable::try_new(listing_config)?))?;
 
-    // Step 3: Create physical plan with filter
+    // Step 3: Create a physical plan
     println!("Step 3: Creating physical plan with filter...");
-    let df = ctx.sql("SELECT * FROM my_table WHERE id > 5").await?;
-    let original_plan = df.create_physical_plan().await?;
+    let original_plan = ctx
+        .sql("SELECT * FROM my_table WHERE id > 5")
+        .await?
+        .create_physical_plan()
+        .await?;
+    println!(
+        "  Original plan adapter tag: {:?}",
+        adapter_tag(&original_plan)
+    );
 
-    // Verify adapter is present in original plan
-    let has_adapter_before = verify_adapter_in_plan(&original_plan, "original");
-    println!("  Original plan has adapter: {has_adapter_before}");
-
-    // Step 4: Serialize with our custom codec
-    println!("\nStep 4: Serializing plan with AdapterPreservingCodec...");
-    let codec = AdapterPreservingCodec;
-    let bytes = physical_plan_to_bytes_with_proto_converter(
+    // Step 4: Without a codec for the factory, serialization is refused
+    println!("\nStep 4: Serializing with a codec that does not know the factory...");
+    let err = physical_plan_to_bytes_with_extension_codec(
         Arc::clone(&original_plan),
-        &codec,
-        &codec,
-    )?;
-    println!("  Serialized {} bytes", bytes.len());
-    println!("  (DataSourceExec with adapter was wrapped as PhysicalExtensionNode)");
+        &DefaultPhysicalExtensionCodec {},
+    )
+    .expect_err("a custom adapter factory must not be dropped silently");
+    println!("  Refused, as expected:\n  {}", err.strip_backtrace());
 
-    // Step 5: Deserialize with our custom codec
-    println!("\nStep 5: Deserializing plan with AdapterPreservingCodec...");
+    // Step 5: Round-trip with AdapterCodec
+    println!("\nStep 5: Round-tripping the plan with AdapterCodec...");
+    let codec = AdapterCodec;
+    let bytes =
+        physical_plan_to_bytes_with_extension_codec(Arc::clone(&original_plan), &codec)?;
+    println!("  Serialized {} bytes", bytes.len());
     let task_ctx = ctx.task_ctx();
     let restored_plan =
-        physical_plan_from_bytes_with_proto_converter(&bytes, &task_ctx, &codec, &codec)?;
+        physical_plan_from_bytes_with_extension_codec(&bytes, &task_ctx, &codec)?;
+    let restored_tag = adapter_tag(&restored_plan);
+    println!("  Restored plan adapter tag: {restored_tag:?}");
+    assert_eq!(restored_tag.as_deref(), Some("v1"));
 
-    // Verify adapter is restored
-    let has_adapter_after = verify_adapter_in_plan(&restored_plan, "restored");
-    println!("  Restored plan has adapter: {has_adapter_after}");
-
-    // Step 6: Execute and compare results
+    // Step 6: Execute both plans and compare results
     println!("\nStep 6: Executing plans and comparing results...");
     let original_results =
         datafusion::physical_plan::collect(Arc::clone(&original_plan), task_ctx.clone())
@@ -167,61 +155,30 @@ pub async fn adapter_serialization() -> Result<()> {
         "| 10 |",
         "+----+",
     ];
-
-    println!("\n  Original plan results:");
-    arrow::util::pretty::print_batches(&original_results)?;
     assert_batches_eq!(expected, &original_results);
-
-    println!("\n  Restored plan results:");
-    arrow::util::pretty::print_batches(&restored_results)?;
     assert_batches_eq!(expected, &restored_results);
 
     println!("\n=== Example Complete! ===");
     println!("Key takeaways:");
+    println!("  1. Adapter factories are downcastable (`downcast_ref::<T>()`)");
     println!(
-        "  1. PhysicalProtoConverterExtension provides execution_plan_to_proto/proto_to_execution_plan hooks"
+        "  2. A PhysicalExtensionCodec serializes custom factories via try_encode_expr_adapter_factory / try_decode_expr_adapter_factory"
     );
-    println!("  2. Custom metadata can be wrapped as PhysicalExtensionNode");
-    println!("  3. Nested serialization (protobuf + JSON) works seamlessly");
-    println!(
-        "  4. Both plans produce identical results despite serialization round-trip"
-    );
-    println!("  5. Adapters are fully preserved through the serialization round-trip");
+    println!("  3. Serializing a custom factory no codec handles is an error");
+    println!("  4. Both plans produce identical results after the round trip");
 
     Ok(())
 }
 
 // ============================================================================
-// MetadataAdapter - A simple custom adapter with a tag
+// MetadataAdapterFactory - a custom, stateful adapter factory
 // ============================================================================
 
-/// A custom PhysicalExprAdapter that wraps another adapter.
-/// The tag metadata is stored in the factory, not the adapter itself.
-#[derive(Debug)]
-struct MetadataAdapter {
-    inner: Arc<dyn PhysicalExprAdapter>,
-}
-
-impl PhysicalExprAdapter for MetadataAdapter {
-    fn rewrite(&self, expr: Arc<dyn PhysicalExpr>) -> Result<Arc<dyn PhysicalExpr>> {
-        // Simply delegate to inner adapter
-        self.inner.rewrite(expr)
-    }
-}
-
-// ============================================================================
-// MetadataAdapterFactory - Factory for creating MetadataAdapter instances
-// ============================================================================
-
-/// Factory for creating MetadataAdapter instances.
-/// The tag is stored in the factory and extracted via Debug formatting in `extract_adapter_tag`.
+/// A custom adapter factory carrying a `tag`, standing in for real state such
+/// as a table format's field-id mapping. Its adapters delegate to DataFusion's
+/// default adapter.
 #[derive(Debug)]
 struct MetadataAdapterFactory {
-    // Note: This field is read via Debug formatting in `extract_adapter_tag`.
-    // Rust's dead code analysis doesn't recognize Debug-based field access.
-    // In PR #19234, this field is used by `with_partition_values`, but that method
-    // doesn't exist in upstream DataFusion's PhysicalExprAdapter trait.
-    #[expect(dead_code)]
     tag: String,
 }
 
@@ -243,200 +200,93 @@ impl PhysicalExprAdapterFactory for MetadataAdapterFactory {
     }
 }
 
-// ============================================================================
-// AdapterPreservingCodec - Custom codec that preserves adapters
-// ============================================================================
-
-/// Extension payload structure for serializing adapter info
-#[derive(Serialize, Deserialize)]
-struct ExtensionPayload {
-    /// Marker to identify this is our custom extension
-    marker: String,
-    /// JSON-serialized adapter metadata
-    adapter_metadata: AdapterMetadata,
-}
-
-/// Metadata about the adapter to recreate it during deserialization
-#[derive(Serialize, Deserialize)]
-struct AdapterMetadata {
-    /// The adapter tag (e.g., "v1")
-    tag: String,
-}
-
-const EXTENSION_MARKER: &str = "adapter_preserving_extension_v1";
-
-/// A codec that intercepts serialization to preserve adapter information.
+/// The adapter created by [`MetadataAdapterFactory`].
 #[derive(Debug)]
-struct AdapterPreservingCodec;
+struct MetadataAdapter {
+    inner: Arc<dyn PhysicalExprAdapter>,
+}
 
-impl PhysicalExtensionCodec for AdapterPreservingCodec {
-    // Required method: decode custom extension nodes
+impl PhysicalExprAdapter for MetadataAdapter {
+    fn rewrite(&self, expr: Arc<dyn PhysicalExpr>) -> Result<Arc<dyn PhysicalExpr>> {
+        self.inner.rewrite(expr)
+    }
+}
+
+// ============================================================================
+// AdapterCodec - serializes MetadataAdapterFactory
+// ============================================================================
+
+/// Serializes [`MetadataAdapterFactory`] as its UTF-8 tag. The payload is
+/// opaque to DataFusion, so any encoding works.
+#[derive(Debug)]
+struct AdapterCodec;
+
+impl PhysicalExtensionCodec for AdapterCodec {
     fn try_decode(
         &self,
-        buf: &[u8],
-        inputs: &[Arc<dyn ExecutionPlan>],
+        _buf: &[u8],
+        _inputs: &[Arc<dyn ExecutionPlan>],
         _ctx: &TaskContext,
         _proto_converter: &dyn PhysicalProtoConverterExtension,
     ) -> Result<Arc<dyn ExecutionPlan>> {
-        // Try to parse as our extension payload
-        if let Ok(payload) = serde_json::from_slice::<ExtensionPayload>(buf)
-            && payload.marker == EXTENSION_MARKER
-        {
-            if inputs.len() != 1 {
-                return Err(datafusion::error::DataFusionError::Plan(format!(
-                    "Extension node expected exactly 1 child, got {}",
-                    inputs.len()
-                )));
-            }
-            let inner_plan = inputs[0].clone();
-
-            // Recreate the adapter factory
-            let adapter_factory = create_adapter_factory(&payload.adapter_metadata.tag);
-
-            // Inject adapter into the plan
-            return inject_adapter_into_plan(inner_plan, adapter_factory);
-        }
-
-        not_impl_err!("Unknown extension type")
+        not_impl_err!("AdapterCodec has no custom execution plans")
     }
 
-    // Required method: encode custom execution plans
     fn try_encode(
         &self,
         _node: Arc<dyn ExecutionPlan>,
         _buf: &mut Vec<u8>,
         _proto_converter: &dyn PhysicalProtoConverterExtension,
     ) -> Result<()> {
-        // We don't need this for the example - adapter wrapping happens in
-        // `execution_plan_to_proto` instead.
-        not_impl_err!(
-            "try_encode not used - adapter wrapping happens in execution_plan_to_proto"
-        )
-    }
-}
-
-impl PhysicalProtoConverterExtension for AdapterPreservingCodec {
-    fn execution_plan_to_proto(
-        &self,
-        plan: &Arc<dyn ExecutionPlan>,
-        extension_codec: &dyn PhysicalExtensionCodec,
-    ) -> Result<PhysicalPlanNode> {
-        // Check if this is a DataSourceExec with adapter
-        if let Some(exec) = plan.downcast_ref::<DataSourceExec>()
-            && let Some(config) = exec.data_source().downcast_ref::<FileScanConfig>()
-            && let Some(adapter_factory) = &config.expr_adapter_factory
-            && let Some(tag) = extract_adapter_tag(adapter_factory.as_ref())
-        {
-            // Try to extract our MetadataAdapterFactory's tag
-            println!("    [Serialize] Found DataSourceExec with adapter tag: {tag}");
-
-            // 1. Create adapter metadata
-            let adapter_metadata = AdapterMetadata { tag };
-
-            // 2. Serialize the inner plan to protobuf
-            //    Note that this will drop the custom adapter since the default serialization cannot handle it
-            let inner_proto = PhysicalPlanNode::try_from_physical_plan_with_converter(
-                Arc::clone(plan),
-                extension_codec,
-                self,
-            )?;
-
-            // 3. Create extension payload to wrap the plan
-            //    so that the custom adapter gets re-attached during deserialization
-            //    The choice of JSON is arbitrary; other formats could be used.
-            let payload = ExtensionPayload {
-                marker: EXTENSION_MARKER.to_string(),
-                adapter_metadata,
-            };
-            let payload_bytes = serde_json::to_vec(&payload).map_err(|e| {
-                datafusion::error::DataFusionError::Plan(format!(
-                    "Failed to serialize payload: {e}"
-                ))
-            })?;
-
-            // 4. Return as PhysicalExtensionNode with child plan in inputs
-            return Ok(PhysicalPlanNode {
-                physical_plan_type: Some(PhysicalPlanType::Extension(
-                    PhysicalExtensionNode {
-                        node: payload_bytes,
-                        inputs: vec![inner_proto],
-                    },
-                )),
-            });
-        }
-
-        // No adapter found, not a DataSourceExec, etc. - use default serialization
-        PhysicalPlanNode::try_from_physical_plan_with_converter(
-            Arc::clone(plan),
-            extension_codec,
-            self,
-        )
+        not_impl_err!("AdapterCodec has no custom execution plans")
     }
 
-    // Interception point: override deserialization to unwrap adapters
-    fn proto_to_execution_plan(
+    fn try_encode_expr_adapter_factory(
         &self,
-        proto: &PhysicalPlanNode,
-        ctx: &PhysicalPlanDecodeContext<'_>,
-    ) -> Result<Arc<dyn ExecutionPlan>> {
-        // Check if this is our custom extension wrapper
-        if let Some(PhysicalPlanType::Extension(extension)) = &proto.physical_plan_type
-            && let Ok(payload) =
-                serde_json::from_slice::<ExtensionPayload>(&extension.node)
-            && payload.marker == EXTENSION_MARKER
-        {
-            println!(
-                "    [Deserialize] Found adapter extension with tag: {}",
-                payload.adapter_metadata.tag
-            );
-
-            // Get the inner plan proto from inputs field
-            if extension.inputs.is_empty() {
-                return Err(datafusion::error::DataFusionError::Plan(
-                    "Extension node missing child plan in inputs".to_string(),
-                ));
-            }
-            let inner_proto = &extension.inputs[0];
-
-            // Deserialize the inner plan
-            let inner_plan = self.default_proto_to_execution_plan(inner_proto, ctx)?;
-
-            // Recreate the adapter factory
-            let adapter_factory = create_adapter_factory(&payload.adapter_metadata.tag);
-
-            // Inject adapter into the plan
-            return inject_adapter_into_plan(inner_plan, adapter_factory);
-        }
-
-        // Not our extension - use default deserialization
-        self.default_proto_to_execution_plan(proto, ctx)
+        factory: &Arc<dyn PhysicalExprAdapterFactory>,
+        buf: &mut Vec<u8>,
+    ) -> Result<()> {
+        // Return an error for factories this codec does not own, so a
+        // ComposedPhysicalExtensionCodec can try the next codec.
+        let Some(factory) = factory.downcast_ref::<MetadataAdapterFactory>() else {
+            return not_impl_err!("AdapterCodec only encodes MetadataAdapterFactory");
+        };
+        buf.extend_from_slice(factory.tag.as_bytes());
+        Ok(())
     }
 
-    fn proto_to_physical_expr(
+    fn try_decode_expr_adapter_factory(
         &self,
-        proto: &PhysicalExprNode,
-        input_schema: &Schema,
-        ctx: &PhysicalPlanDecodeContext<'_>,
-    ) -> Result<Arc<dyn PhysicalExpr>> {
-        parse_physical_expr_with_converter(proto, input_schema, ctx, self)
-    }
-
-    fn physical_expr_to_proto(
-        &self,
-        expr: &Arc<dyn PhysicalExpr>,
-        codec: &dyn PhysicalExtensionCodec,
-    ) -> Result<PhysicalExprNode> {
-        serialize_physical_expr_with_converter(expr, codec, self)
+        buf: &[u8],
+    ) -> Result<Arc<dyn PhysicalExprAdapterFactory>> {
+        let tag = std::str::from_utf8(buf).map_err(|e| {
+            internal_datafusion_err!("invalid MetadataAdapterFactory tag: {e}")
+        })?;
+        Ok(Arc::new(MetadataAdapterFactory::new(tag)))
     }
 }
 
 // ============================================================================
-// Helper functions
+// Helpers
 // ============================================================================
 
-/// Write a RecordBatch to Parquet in the object store
+/// The `MetadataAdapterFactory` tag of the first file scan in `plan`, if any.
+fn adapter_tag(plan: &Arc<dyn ExecutionPlan>) -> Option<String> {
+    if let Some(exec) = plan.downcast_ref::<DataSourceExec>()
+        && let Some(config) = exec.data_source().downcast_ref::<FileScanConfig>()
+    {
+        return config
+            .expr_adapter_factory
+            .as_ref()?
+            .downcast_ref::<MetadataAdapterFactory>()
+            .map(|factory| factory.tag.clone());
+    }
+    plan.children().into_iter().find_map(adapter_tag)
+}
+
+/// Write `batch` as a Parquet file at `path` in `store`.
 async fn write_parquet(
-    store: &dyn ObjectStore,
+    store: &Arc<dyn ObjectStore>,
     path: &Path,
     batch: &arrow::record_batch::RecordBatch,
 ) -> Result<()> {
@@ -448,69 +298,4 @@ async fn write_parquet(
     let payload = PutPayload::from_bytes(buf.into());
     store.put(path, payload).await?;
     Ok(())
-}
-
-/// Extract the tag from a MetadataAdapterFactory.
-///
-/// Note: Since `PhysicalExprAdapterFactory` doesn't provide `as_any()` for downcasting,
-/// we parse the Debug output. In a production system, you might add a dedicated trait
-/// method for metadata extraction.
-fn extract_adapter_tag(factory: &dyn PhysicalExprAdapterFactory) -> Option<String> {
-    let debug_str = format!("{factory:?}");
-    if debug_str.contains("MetadataAdapterFactory") {
-        // Extract tag from debug output: MetadataAdapterFactory { tag: "v1" }
-        if let Some(start) = debug_str.find("tag: \"") {
-            let after_tag = &debug_str[start + 6..];
-            if let Some(end) = after_tag.find('"') {
-                return Some(after_tag[..end].to_string());
-            }
-        }
-    }
-    None
-}
-
-/// Create an adapter factory from a tag
-fn create_adapter_factory(tag: &str) -> Arc<dyn PhysicalExprAdapterFactory> {
-    Arc::new(MetadataAdapterFactory::new(tag))
-}
-
-/// Inject an adapter into a plan (assumes plan is a DataSourceExec with FileScanConfig)
-fn inject_adapter_into_plan(
-    plan: Arc<dyn ExecutionPlan>,
-    adapter_factory: Arc<dyn PhysicalExprAdapterFactory>,
-) -> Result<Arc<dyn ExecutionPlan>> {
-    if let Some(exec) = plan.downcast_ref::<DataSourceExec>()
-        && let Some(config) = exec.data_source().downcast_ref::<FileScanConfig>()
-    {
-        let new_config = FileScanConfigBuilder::from(config.clone())
-            .with_expr_adapter(Some(adapter_factory))
-            .build();
-        return Ok(DataSourceExec::from_data_source(new_config));
-    }
-    // If not a DataSourceExec with FileScanConfig, return as-is
-    Ok(plan)
-}
-
-/// Helper to verify if a plan has an adapter (for testing/validation)
-fn verify_adapter_in_plan(plan: &Arc<dyn ExecutionPlan>, label: &str) -> bool {
-    // Walk the plan tree to find DataSourceExec with adapter
-    fn check_plan(plan: &dyn ExecutionPlan) -> bool {
-        if let Some(exec) = plan.downcast_ref::<DataSourceExec>()
-            && let Some(config) = exec.data_source().downcast_ref::<FileScanConfig>()
-            && config.expr_adapter_factory.is_some()
-        {
-            return true;
-        }
-        // Check children
-        for child in plan.children() {
-            if check_plan(child.as_ref()) {
-                return true;
-            }
-        }
-        false
-    }
-
-    let has_adapter = check_plan(plan.as_ref());
-    println!("    [Verify] {label} plan adapter check: {has_adapter}");
-    has_adapter
 }
