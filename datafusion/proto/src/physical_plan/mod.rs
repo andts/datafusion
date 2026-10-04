@@ -104,6 +104,7 @@ fn encode_human_display_alias(human_display: &str, alias: &str) -> String {
 #[cfg(test)]
 mod file_scan_config_serde {
     use super::*;
+    use crate::protobuf::physical_expr_adapter_factory_node::FactoryType;
     use arrow::datatypes::{DataType, Field};
     use datafusion_common::{Constraint, Constraints, ScalarValue, Statistics};
     use datafusion_datasource::file::FileSource;
@@ -290,15 +291,19 @@ mod file_scan_config_serde {
     }
 
     struct FileScanSerdeHarness {
-        codec: DefaultPhysicalExtensionCodec,
+        codec: Arc<dyn PhysicalExtensionCodec>,
         converter: DefaultPhysicalProtoConverter,
         task_ctx: TaskContext,
     }
 
     impl FileScanSerdeHarness {
         fn new() -> Self {
+            Self::with_codec(Arc::new(DefaultPhysicalExtensionCodec {}))
+        }
+
+        fn with_codec(codec: Arc<dyn PhysicalExtensionCodec>) -> Self {
             Self {
-                codec: DefaultPhysicalExtensionCodec {},
+                codec,
                 converter: DefaultPhysicalProtoConverter {},
                 task_ctx: TaskContext::default(),
             }
@@ -306,7 +311,7 @@ mod file_scan_config_serde {
 
         fn encode(&self, config: &FileScanConfig) -> Result<protobuf::FileScanExecConf> {
             let encoder = ConverterPlanEncoder {
-                codec: &self.codec,
+                codec: self.codec.as_ref(),
                 proto_converter: &self.converter,
             };
             config.try_to_proto(&ExecutionPlanEncodeCtx::new(&encoder))
@@ -322,7 +327,7 @@ mod file_scan_config_serde {
             file_source: Arc<dyn FileSource>,
         ) -> Result<FileScanConfig> {
             let physical_decode_ctx =
-                PhysicalPlanDecodeContext::new(&self.task_ctx, &self.codec);
+                PhysicalPlanDecodeContext::new(&self.task_ctx, self.codec.as_ref());
             let decoder = ConverterPlanDecoder {
                 ctx: &physical_decode_ctx,
                 proto_converter: &self.converter,
@@ -628,6 +633,136 @@ mod file_scan_config_serde {
         composed.try_encode_expr_adapter_factory(&tagged_factory("v2"), &mut buf)?;
         let decoded = composed.try_decode_expr_adapter_factory(&buf)?;
         assert_eq!(tag_of(&decoded), "v2");
+        Ok(())
+    }
+
+    fn config_with_adapter(
+        factory: Option<Arc<dyn PhysicalExprAdapterFactory>>,
+    ) -> FileScanConfig {
+        let mut config = test_config(None);
+        config.expr_adapter_factory = factory;
+        config
+    }
+
+    fn adapter_factory_type(conf: &protobuf::FileScanExecConf) -> Option<&FactoryType> {
+        conf.expr_adapter_factory
+            .as_ref()
+            .and_then(|node| node.factory_type.as_ref())
+    }
+
+    #[test]
+    fn roundtrips_custom_expr_adapter_factory() -> Result<()> {
+        let serde = FileScanSerdeHarness::with_codec(Arc::new(TaggedAdapterCodec));
+        let encoded = serde.encode(&config_with_adapter(Some(tagged_factory("v1"))))?;
+        assert_eq!(
+            adapter_factory_type(&encoded),
+            Some(&FactoryType::Extension(b"v1".to_vec()))
+        );
+
+        let decoded = serde.decode(&encoded)?;
+        let factory = decoded
+            .expr_adapter_factory
+            .as_ref()
+            .expect("adapter factory must survive the round trip");
+        assert_eq!(tag_of(factory), "v1");
+
+        // A decoded plan can be re-shipped unchanged.
+        let reencoded = serde.encode(&decoded)?;
+        assert_eq!(reencoded.expr_adapter_factory, encoded.expr_adapter_factory);
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_unencodable_expr_adapter_factory() {
+        let serde = FileScanSerdeHarness::new();
+        let err = serde
+            .encode(&config_with_adapter(Some(tagged_factory("v1"))))
+            .expect_err("a custom factory without a codec must not be dropped");
+        let message = err.to_string();
+        assert!(message.contains("TaggedAdapterFactory"), "{message}");
+        assert!(message.contains("would change scan semantics"), "{message}");
+        assert!(
+            matches!(err.find_root(), DataFusionError::NotImplemented(_)),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn roundtrips_default_expr_adapter_factory_without_codec() -> Result<()> {
+        let serde = FileScanSerdeHarness::new();
+        let encoded = serde.encode(&config_with_adapter(Some(Arc::new(
+            DefaultPhysicalExprAdapterFactory,
+        ))))?;
+        assert!(matches!(
+            adapter_factory_type(&encoded),
+            Some(FactoryType::Default(_))
+        ));
+
+        let decoded = serde.decode(&encoded)?;
+        assert!(
+            decoded
+                .expr_adapter_factory
+                .expect("default factory must survive the round trip")
+                .is::<DefaultPhysicalExprAdapterFactory>()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn keeps_absent_expr_adapter_factory_absent() -> Result<()> {
+        let serde = FileScanSerdeHarness::new();
+        let encoded = serde.encode(&config_with_adapter(None))?;
+        assert!(encoded.expr_adapter_factory.is_none());
+        assert!(serde.decode(&encoded)?.expr_adapter_factory.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn routes_expr_adapter_factory_through_composed_codec() -> Result<()> {
+        let serde = FileScanSerdeHarness::with_codec(Arc::new(
+            ComposedPhysicalExtensionCodec::new(vec![
+                Arc::new(DefaultPhysicalExtensionCodec {}),
+                Arc::new(TaggedAdapterCodec),
+            ]),
+        ));
+        let encoded = serde.encode(&config_with_adapter(Some(tagged_factory("v3"))))?;
+        let decoded = serde.decode(&encoded)?;
+        assert_eq!(
+            tag_of(
+                decoded
+                    .expr_adapter_factory
+                    .as_ref()
+                    .expect("adapter factory")
+            ),
+            "v3"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn decode_rejects_extension_payload_without_codec() -> Result<()> {
+        let encoded = FileScanSerdeHarness::with_codec(Arc::new(TaggedAdapterCodec))
+            .encode(&config_with_adapter(Some(tagged_factory("v1"))))?;
+        let err = FileScanSerdeHarness::new()
+            .decode(&encoded)
+            .expect_err("an undecodable adapter must not be silently dropped");
+        assert!(
+            matches!(err.find_root(), DataFusionError::NotImplemented(_)),
+            "{err:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn decode_rejects_adapter_node_without_factory_type() -> Result<()> {
+        let serde = FileScanSerdeHarness::new();
+        let mut encoded = serde.encode(&config_with_adapter(None))?;
+        encoded.expr_adapter_factory =
+            Some(protobuf::PhysicalExprAdapterFactoryNode { factory_type: None });
+        let err = serde
+            .decode(&encoded)
+            .expect_err("a malformed adapter node must not decode");
+        assert!(err.to_string().contains("factory_type"), "{err}");
         Ok(())
     }
 }

@@ -28,12 +28,15 @@
 //! `*ScanExecNode` around [`FileScanConfig::try_to_proto`] and decodes with
 //! [`FileScanConfig::try_from_proto`], keeping a single copy of the shared
 //! wire logic. The wire format is byte-for-byte identical to the old central
-//! serializer.
+//! serializer for scans without an adapter factory.
 //!
 //! Child physical expressions (sort orderings, hash/range partitioning, and
 //! projection expressions) are (de)serialized through `ctx.encode_expr` /
 //! `ctx.decode_expr`; `Schema`, `Statistics`, `Constraints`, and `ScalarValue`
-//! go through `datafusion-proto-common`. Nothing here needs the raw codec.
+//! go through `datafusion-proto-common`. A custom
+//! `PhysicalExprAdapterFactory` is serialized through
+//! `ctx.encode_expr_adapter_factory` / `ctx.decode_expr_adapter_factory`, so
+//! nothing here needs the raw codec.
 
 use std::sync::Arc;
 
@@ -42,11 +45,15 @@ use datafusion_common::{DataFusionError, Result, internal_datafusion_err};
 use datafusion_execution::object_store::ObjectStoreUrl;
 use datafusion_physical_expr::projection::{ProjectionExpr, ProjectionExprs};
 use datafusion_physical_expr::{LexOrdering, Partitioning};
+use datafusion_physical_expr_adapter::{
+    DefaultPhysicalExprAdapterFactory, PhysicalExprAdapterFactory,
+};
 use datafusion_physical_expr_common::sort_expr::{
     sort_exprs_try_from_proto, sort_exprs_try_to_proto,
 };
 use datafusion_physical_plan::proto::{ExecutionPlanDecodeCtx, ExecutionPlanEncodeCtx};
 use datafusion_proto_models::protobuf;
+use datafusion_proto_models::protobuf::physical_expr_adapter_factory_node::FactoryType;
 
 use crate::file::FileSource;
 use crate::file_scan_config::{FileScanConfig, FileScanConfigBuilder};
@@ -114,6 +121,12 @@ impl FileScanConfig {
             })
             .transpose()?;
 
+        let expr_adapter_factory = self
+            .expr_adapter_factory
+            .as_ref()
+            .map(|factory| expr_adapter_factory_to_proto(factory, ctx))
+            .transpose()?;
+
         Ok(protobuf::FileScanExecConf {
             file_groups,
             statistics: Some((&self.statistics()).into()),
@@ -131,6 +144,7 @@ impl FileScanConfig {
             batch_size: self.batch_size.map(|s| s as u64),
             projection_exprs,
             output_partitioning,
+            expr_adapter_factory,
         })
     }
 
@@ -219,6 +233,12 @@ impl FileScanConfig {
             file_source
         };
 
+        let expr_adapter_factory = conf
+            .expr_adapter_factory
+            .as_ref()
+            .map(|node| expr_adapter_factory_from_proto(node, ctx))
+            .transpose()?;
+
         let config_builder = FileScanConfigBuilder::new(object_store_url, file_source)
             .with_file_groups(file_groups)
             .with_constraints(constraints)
@@ -226,7 +246,8 @@ impl FileScanConfig {
             .with_limit(conf.limit.as_ref().map(|sl| sl.limit as usize))
             .with_output_ordering(output_ordering)
             .with_output_partitioning(output_partitioning)
-            .with_batch_size(conf.batch_size.map(|s| s as usize));
+            .with_batch_size(conf.batch_size.map(|s| s as usize))
+            .with_expr_adapter(expr_adapter_factory);
         Ok(config_builder.build())
     }
 
@@ -282,4 +303,43 @@ fn parse_file_scan_schema(conf: &protobuf::FileScanExecConf) -> Result<Arc<Schem
         })?
         .try_into()?;
     Ok(Arc::new(schema))
+}
+
+/// Encode a scan's adapter factory. DataFusion's default factory needs no
+/// codec; any other factory must be handled by a `PhysicalExtensionCodec`.
+/// Failing here, rather than dropping the factory, keeps the decoded scan
+/// from silently reading files with different semantics.
+fn expr_adapter_factory_to_proto(
+    factory: &Arc<dyn PhysicalExprAdapterFactory>,
+    ctx: &ExecutionPlanEncodeCtx<'_>,
+) -> Result<protobuf::PhysicalExprAdapterFactoryNode> {
+    let factory_type = if factory.is::<DefaultPhysicalExprAdapterFactory>() {
+        FactoryType::Default(protobuf::DefaultPhysicalExprAdapterFactoryNode {})
+    } else {
+        let payload = ctx.encode_expr_adapter_factory(factory).map_err(|e| {
+            e.context(format!(
+                "FileScanConfig uses PhysicalExprAdapterFactory {factory:?}, which no \
+                 PhysicalExtensionCodec can serialize; serializing without it would \
+                 change scan semantics"
+            ))
+        })?;
+        FactoryType::Extension(payload)
+    };
+    Ok(protobuf::PhysicalExprAdapterFactoryNode {
+        factory_type: Some(factory_type),
+    })
+}
+
+/// Decode a scan's adapter factory written by [`expr_adapter_factory_to_proto`].
+fn expr_adapter_factory_from_proto(
+    node: &protobuf::PhysicalExprAdapterFactoryNode,
+    ctx: &ExecutionPlanDecodeCtx<'_>,
+) -> Result<Arc<dyn PhysicalExprAdapterFactory>> {
+    match &node.factory_type {
+        Some(FactoryType::Default(_)) => Ok(Arc::new(DefaultPhysicalExprAdapterFactory)),
+        Some(FactoryType::Extension(payload)) => ctx.decode_expr_adapter_factory(payload),
+        None => Err(internal_datafusion_err!(
+            "PhysicalExprAdapterFactoryNode is missing required field 'factory_type'"
+        )),
+    }
 }

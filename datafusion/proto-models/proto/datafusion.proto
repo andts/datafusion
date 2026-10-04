@@ -1260,7 +1260,22 @@ message FileScanExecConf {
   reserved 14;
   reserved "partitioned_by_file_group";
   optional Partitioning output_partitioning = 15;
+  // The scan's PhysicalExprAdapterFactory. Absent: no adapter configured (the
+  // scan uses DataFusion's default at execution time).
+  optional PhysicalExprAdapterFactoryNode expr_adapter_factory = 16;
 }
+
+message PhysicalExprAdapterFactoryNode {
+  oneof factory_type {
+    // DataFusion's built-in DefaultPhysicalExprAdapterFactory; needs no codec.
+    DefaultPhysicalExprAdapterFactoryNode default = 1;
+    // Opaque payload produced by
+    // PhysicalExtensionCodec::try_encode_expr_adapter_factory.
+    bytes extension = 2;
+  }
+}
+
+message DefaultPhysicalExprAdapterFactoryNode {}
 
 message ParquetScanExecNode {
   FileScanExecConf base_conf = 1;
