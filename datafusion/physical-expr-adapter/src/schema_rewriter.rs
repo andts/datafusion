@@ -19,6 +19,7 @@
 //! [`PhysicalExprAdapterFactory`], default implementations,
 //! and [`replace_columns_with_literals`].
 
+use std::any::Any;
 use std::borrow::Borrow;
 use std::collections::HashMap;
 use std::hash::Hash;
@@ -172,13 +173,37 @@ pub trait PhysicalExprAdapter: Send + Sync + std::fmt::Debug {
 /// Creates instances of [`PhysicalExprAdapter`] for given logical and physical schemas.
 ///
 /// See [`DefaultPhysicalExprAdapterFactory`] for the default implementation.
-pub trait PhysicalExprAdapterFactory: Send + Sync + std::fmt::Debug {
+///
+/// Factories are downcastable (see [`is`](Self::is) /
+/// [`downcast_ref`](Self::downcast_ref)) so that, for example, a
+/// `datafusion-proto` `PhysicalExtensionCodec` can recognise and serialize them.
+pub trait PhysicalExprAdapterFactory: Any + Send + Sync + std::fmt::Debug {
     /// Create a new instance of the physical expression adapter.
     fn create(
         &self,
         logical_file_schema: SchemaRef,
         physical_file_schema: SchemaRef,
     ) -> Result<Arc<dyn PhysicalExprAdapter>>;
+}
+
+impl dyn PhysicalExprAdapterFactory {
+    /// Returns `true` if the factory is of type `T`.
+    ///
+    /// Works correctly when called on `Arc<dyn PhysicalExprAdapterFactory>` via
+    /// auto-deref.
+    pub fn is<T: PhysicalExprAdapterFactory>(&self) -> bool {
+        (self as &dyn Any).is::<T>()
+    }
+
+    /// Attempts to downcast this factory to a concrete type `T`, returning
+    /// `None` if the factory is not of that type.
+    ///
+    /// Works correctly when called on `Arc<dyn PhysicalExprAdapterFactory>` via
+    /// auto-deref, unlike `(&arc as &dyn Any).downcast_ref::<T>()` which would
+    /// attempt to downcast the `Arc` itself.
+    pub fn downcast_ref<T: PhysicalExprAdapterFactory>(&self) -> Option<&T> {
+        (self as &dyn Any).downcast_ref::<T>()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -2213,5 +2238,37 @@ mod tests {
         let cast_expr = assert_cast_expr(&rewritten);
         assert_cast_input_column(cast_expr, "a", 1);
         assert_eq!(cast_expr.target_field().data_type(), &DataType::Int64);
+    }
+
+    #[test]
+    fn expr_adapter_factory_is_downcastable() -> Result<()> {
+        #[derive(Debug)]
+        struct OtherFactory;
+
+        impl PhysicalExprAdapterFactory for OtherFactory {
+            fn create(
+                &self,
+                logical_file_schema: SchemaRef,
+                physical_file_schema: SchemaRef,
+            ) -> Result<Arc<dyn PhysicalExprAdapter>> {
+                DefaultPhysicalExprAdapterFactory
+                    .create(logical_file_schema, physical_file_schema)
+            }
+        }
+
+        let default: Arc<dyn PhysicalExprAdapterFactory> =
+            Arc::new(DefaultPhysicalExprAdapterFactory);
+        assert!(default.is::<DefaultPhysicalExprAdapterFactory>());
+        assert!(!default.is::<OtherFactory>());
+        assert!(
+            default
+                .downcast_ref::<DefaultPhysicalExprAdapterFactory>()
+                .is_some()
+        );
+
+        let other: Arc<dyn PhysicalExprAdapterFactory> = Arc::new(OtherFactory);
+        assert!(!other.is::<DefaultPhysicalExprAdapterFactory>());
+        assert!(other.downcast_ref::<OtherFactory>().is_some());
+        Ok(())
     }
 }
