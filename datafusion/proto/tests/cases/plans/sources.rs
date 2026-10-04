@@ -53,7 +53,6 @@ use datafusion::physical_expr_adapter::{
     DefaultPhysicalExprAdapterFactory, PhysicalExprAdapter, PhysicalExprAdapterFactory,
     replace_columns_with_literals,
 };
-use datafusion::physical_plan::ExecutionPlanProperties;
 use datafusion::physical_plan::collect;
 use datafusion::physical_plan::expressions::in_list;
 use datafusion::physical_plan::expressions::{
@@ -1068,6 +1067,14 @@ async fn roundtrip_parquet_scan_with_file_row_index() -> Result<()> {
     Ok(())
 }
 
+/// The `FileScanConfig` of the first file scan in `plan`, if any.
+fn find_file_scan_config(plan: &Arc<dyn ExecutionPlan>) -> Option<FileScanConfig> {
+    if let Some(exec) = plan.downcast_ref::<DataSourceExec>() {
+        return exec.data_source().downcast_ref::<FileScanConfig>().cloned();
+    }
+    plan.children().into_iter().find_map(find_file_scan_config)
+}
+
 /// `(row position, value)` pairs from a two-column `Int64` result, sorted.
 fn position_value_pairs(batches: &[RecordBatch]) -> Vec<(i64, i64)> {
     let mut pairs = vec![];
@@ -1132,8 +1139,16 @@ async fn roundtrip_file_row_index_keeps_absolute_positions_across_byte_ranges()
         .await?
         .create_physical_plan()
         .await?;
+    // Check the scan itself was split: a partition count above 1 alone would
+    // also hold for a round-robin repartition over a single unsplit scan.
+    let scan = find_file_scan_config(&plan).expect("plan has a file scan");
     assert!(
-        plan.output_partitioning().partition_count() > 1,
+        scan.file_groups.len() > 1
+            && scan
+                .file_groups
+                .iter()
+                .flat_map(|group| group.iter())
+                .all(|file| file.range.is_some()),
         "expected the file to be split into byte ranges:\n{}",
         displayable(plan.as_ref()).indent(true)
     );
