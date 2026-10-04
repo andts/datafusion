@@ -105,7 +105,7 @@ fn encode_human_display_alias(human_display: &str, alias: &str) -> String {
 mod file_scan_config_serde {
     use super::*;
     use crate::protobuf::physical_expr_adapter_factory_node::FactoryType;
-    use arrow::datatypes::{DataType, Field};
+    use arrow::datatypes::{DataType, Field, FieldRef};
     use datafusion_common::{Constraint, Constraints, ScalarValue, Statistics};
     use datafusion_datasource::file::FileSource;
     use datafusion_datasource::file_groups::FileGroup;
@@ -763,6 +763,125 @@ mod file_scan_config_serde {
             .decode(&encoded)
             .expect_err("a malformed adapter node must not decode");
         assert!(err.to_string().contains("factory_type"), "{err}");
+        Ok(())
+    }
+
+    /// A scan over `value`, `label` and partition `part`, plus
+    /// `virtual_columns`, projecting `value` and every virtual column.
+    fn config_with_virtual_columns(virtual_columns: Vec<FieldRef>) -> FileScanConfig {
+        let file_schema = Arc::new(Schema::new(vec![
+            Field::new("value", DataType::Int32, false),
+            Field::new("label", DataType::Utf8, true),
+        ]));
+        let table_schema = TableSchema::builder(file_schema)
+            .with_table_partition_cols(vec![Arc::new(Field::new(
+                "part",
+                DataType::Utf8,
+                false,
+            ))])
+            .with_virtual_columns(virtual_columns.clone())
+            .build();
+        let mut projection = vec![FileProjectionExpr::new(
+            Arc::new(Column::new("value", 0)),
+            "value",
+        )];
+        // Virtual columns follow the 2 file columns and the 1 partition column.
+        for (i, field) in virtual_columns.iter().enumerate() {
+            projection.push(FileProjectionExpr::new(
+                Arc::new(Column::new(field.name(), 3 + i)),
+                field.name().as_str(),
+            ));
+        }
+        let source = Arc::new(SerdeTestSource::new(
+            table_schema,
+            Some(FileProjectionExprs::new(projection)),
+        ));
+        FileScanConfigBuilder::new(ObjectStoreUrl::local_filesystem(), source)
+            .with_file_groups(vec![FileGroup::new(vec![
+                PartitionedFile::new("data/part=a/file.arrow", 1024)
+                    .with_partition_values(vec![ScalarValue::Utf8(Some(
+                        "a".to_string(),
+                    ))]),
+            ])])
+            .build()
+    }
+
+    #[test]
+    fn roundtrips_virtual_columns() -> Result<()> {
+        // Metadata is where an Arrow extension type such as the Parquet
+        // `RowNumber` lives, so it must survive the round trip.
+        let virtual_columns: Vec<FieldRef> = vec![Arc::new(
+            Field::new("row_idx", DataType::Int64, true).with_metadata(HashMap::from([
+                (
+                    "virtual_test_key".to_string(),
+                    "virtual_test_value".to_string(),
+                ),
+            ])),
+        )];
+        let config = config_with_virtual_columns(virtual_columns);
+        let serde = FileScanSerdeHarness::new();
+
+        let encoded = serde.encode(&config)?;
+        assert_eq!(encoded.virtual_columns.len(), 1);
+
+        let decoded = serde.decode(&encoded)?;
+        let original_schema = config.file_source().table_schema();
+        let decoded_schema = decoded.file_source().table_schema();
+        assert_eq!(
+            decoded_schema.virtual_columns(),
+            original_schema.virtual_columns()
+        );
+        assert_eq!(
+            decoded_schema.table_schema(),
+            original_schema.table_schema()
+        );
+        assert_eq!(decoded.projected_schema()?, config.projected_schema()?);
+        Ok(())
+    }
+
+    #[test]
+    fn leaves_virtual_columns_empty_without_virtual_columns() -> Result<()> {
+        let serde = FileScanSerdeHarness::new();
+        let encoded = serde.encode(&test_config(None))?;
+        assert!(encoded.virtual_columns.is_empty());
+        let decoded = serde.decode(&encoded)?;
+        assert!(
+            decoded
+                .file_source()
+                .table_schema()
+                .virtual_columns()
+                .is_empty()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn decode_rejects_colliding_virtual_columns() -> Result<()> {
+        let serde = FileScanSerdeHarness::new();
+        let virtual_field = |name: &str| -> Result<datafusion_proto_common::Field> {
+            Ok((&Field::new(name, DataType::Int64, true)).try_into()?)
+        };
+
+        // `value` is a file column and `part` a partition column of `test_config`.
+        for name in ["value", "part"] {
+            let mut encoded = serde.encode(&test_config(None))?;
+            encoded.virtual_columns = vec![virtual_field(name)?];
+            let err = serde
+                .decode(&encoded)
+                .expect_err("a colliding virtual column must not decode");
+            let message = err.to_string();
+            assert!(message.contains(name), "{message}");
+            assert!(message.contains("collides"), "{message}");
+        }
+
+        // Two virtual columns with the same name collide too.
+        let mut encoded = serde.encode(&test_config(None))?;
+        encoded.virtual_columns =
+            vec![virtual_field("row_idx")?, virtual_field("row_idx")?];
+        let err = serde
+            .decode(&encoded)
+            .expect_err("duplicate virtual columns must not decode");
+        assert!(err.to_string().contains("row_idx"), "{err}");
         Ok(())
     }
 }

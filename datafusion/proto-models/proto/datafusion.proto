@@ -1263,6 +1263,10 @@ message FileScanExecConf {
   // The scan's PhysicalExprAdapterFactory. Absent: no adapter configured (the
   // scan uses DataFusion's default at execution time).
   optional PhysicalExprAdapterFactoryNode expr_adapter_factory = 16;
+  // Columns the file reader produces itself (e.g. the Parquet row number), in
+  // TableSchema order. They follow the partition columns in the scan's table
+  // schema. Absent/empty: none.
+  repeated datafusion_common.Field virtual_columns = 17;
 }
 
 message PhysicalExprAdapterFactoryNode {

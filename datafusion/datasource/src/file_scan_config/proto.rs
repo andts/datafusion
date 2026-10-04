@@ -40,7 +40,7 @@
 
 use std::sync::Arc;
 
-use arrow::datatypes::Schema;
+use arrow::datatypes::{Field, FieldRef, Fields, Schema, SchemaBuilder};
 use datafusion_common::{DataFusionError, Result, internal_datafusion_err};
 use datafusion_execution::object_store::ObjectStoreUrl;
 use datafusion_physical_expr::projection::{ProjectionExpr, ProjectionExprs};
@@ -127,6 +127,17 @@ impl FileScanConfig {
             .map(|factory| expr_adapter_factory_to_proto(factory, ctx))
             .transpose()?;
 
+        // Virtual columns travel separately so that `schema` stays file +
+        // partition columns, which is all that older readers understand.
+        let virtual_columns = self
+            .file_source()
+            .table_schema()
+            .virtual_columns()
+            .iter()
+            .map(|field| field.as_ref().try_into())
+            .collect::<Result<Vec<datafusion_proto_models::datafusion_common::Field>, _>>(
+            )?;
+
         Ok(protobuf::FileScanExecConf {
             file_groups,
             statistics: Some((&self.statistics()).into()),
@@ -145,6 +156,7 @@ impl FileScanConfig {
             projection_exprs,
             output_partitioning,
             expr_adapter_factory,
+            virtual_columns,
         })
     }
 
@@ -158,7 +170,9 @@ impl FileScanConfig {
         ctx: &ExecutionPlanDecodeCtx<'_>,
         file_source: Arc<dyn FileSource>,
     ) -> Result<FileScanConfig> {
-        let schema = parse_file_scan_schema(conf)?;
+        // Expressions owned by the scan were encoded against the full table
+        // schema: file, partition, then virtual columns.
+        let schema = parse_full_table_schema(conf)?;
 
         let constraints = conf
             .constraints
@@ -260,6 +274,7 @@ impl FileScanConfig {
         conf: &protobuf::FileScanExecConf,
     ) -> Result<TableSchema> {
         let schema = parse_file_scan_schema(conf)?;
+        let virtual_columns = parse_virtual_columns(conf, &schema)?;
 
         // Reacquire the partition column types from the schema before removing
         // them below.
@@ -287,6 +302,7 @@ impl FileScanConfig {
 
         Ok(TableSchema::builder(file_schema)
             .with_table_partition_cols(table_partition_cols)
+            .with_virtual_columns(virtual_columns)
             .build())
     }
 }
@@ -342,4 +358,46 @@ fn expr_adapter_factory_from_proto(
             "PhysicalExprAdapterFactoryNode is missing required field 'factory_type'"
         )),
     }
+}
+
+/// Parse the scan's full table schema off the base conf: the file and partition
+/// columns carried in `schema`, followed by the virtual columns. This is what
+/// [`TableSchema::table_schema`] returns for the decoded scan, and the schema
+/// the scan's expressions were encoded against.
+fn parse_full_table_schema(conf: &protobuf::FileScanExecConf) -> Result<Arc<Schema>> {
+    let schema = parse_file_scan_schema(conf)?;
+    let virtual_columns = parse_virtual_columns(conf, &schema)?;
+    if virtual_columns.is_empty() {
+        return Ok(schema);
+    }
+    let mut builder = SchemaBuilder::from(schema.as_ref());
+    builder.extend(virtual_columns.iter().cloned());
+    Ok(Arc::new(builder.finish()))
+}
+
+/// Decode the scan's virtual columns, rejecting a name that collides with a
+/// file or partition column (`schema`) or another virtual column.
+/// `TableSchemaBuilder::build` only debug-asserts this, and wire data must not
+/// reach that assert.
+fn parse_virtual_columns(
+    conf: &protobuf::FileScanExecConf,
+    schema: &Schema,
+) -> Result<Fields> {
+    let mut virtual_columns: Vec<FieldRef> =
+        Vec::with_capacity(conf.virtual_columns.len());
+    for field in &conf.virtual_columns {
+        let field = Field::try_from(field)?;
+        let name = field.name();
+        if schema.field_with_name(name).is_ok()
+            || virtual_columns
+                .iter()
+                .any(|existing| existing.name() == name)
+        {
+            return Err(internal_datafusion_err!(
+                "FileScanExecConf virtual column '{name}' collides with another column of the scan"
+            ));
+        }
+        virtual_columns.push(Arc::new(field));
+    }
+    Ok(virtual_columns.into())
 }

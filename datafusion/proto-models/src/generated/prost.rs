@@ -1942,6 +1942,11 @@ pub struct FileScanExecConf {
     /// scan uses DataFusion's default at execution time).
     #[prost(message, optional, tag = "16")]
     pub expr_adapter_factory: ::core::option::Option<PhysicalExprAdapterFactoryNode>,
+    /// Columns the file reader produces itself (e.g. the Parquet row number), in
+    /// TableSchema order. They follow the partition columns in the scan's table
+    /// schema. Absent/empty: none.
+    #[prost(message, repeated, tag = "17")]
+    pub virtual_columns: ::prost::alloc::vec::Vec<super::datafusion_common::Field>,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct PhysicalExprAdapterFactoryNode {
