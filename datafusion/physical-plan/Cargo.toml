@@ -48,6 +48,7 @@ tokio_coop_fallback = []
 proto = [
     "dep:datafusion-proto-models",
     "dep:datafusion-proto-common",
+    "dep:datafusion-physical-expr-adapter",
     "datafusion-physical-expr/proto",
     "datafusion-physical-expr-common/proto",
 ]
@@ -74,6 +75,7 @@ datafusion-functions = { workspace = true }
 datafusion-functions-aggregate-common = { workspace = true }
 datafusion-functions-window-common = { workspace = true }
 datafusion-physical-expr = { workspace = true, default-features = true }
+datafusion-physical-expr-adapter = { workspace = true, optional = true }
 datafusion-physical-expr-common = { workspace = true }
 datafusion-proto-common = { workspace = true, optional = true }
 datafusion-proto-models = { workspace = true, optional = true }

@@ -1938,7 +1938,33 @@ pub struct FileScanExecConf {
     pub projection_exprs: ::core::option::Option<ProjectionExprs>,
     #[prost(message, optional, tag = "15")]
     pub output_partitioning: ::core::option::Option<Partitioning>,
+    /// The scan's PhysicalExprAdapterFactory. Absent: no adapter configured (the
+    /// scan uses DataFusion's default at execution time).
+    #[prost(message, optional, tag = "16")]
+    pub expr_adapter_factory: ::core::option::Option<PhysicalExprAdapterFactoryNode>,
 }
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct PhysicalExprAdapterFactoryNode {
+    #[prost(oneof = "physical_expr_adapter_factory_node::FactoryType", tags = "1, 2")]
+    pub factory_type: ::core::option::Option<
+        physical_expr_adapter_factory_node::FactoryType,
+    >,
+}
+/// Nested message and enum types in `PhysicalExprAdapterFactoryNode`.
+pub mod physical_expr_adapter_factory_node {
+    #[derive(Clone, PartialEq, Eq, Hash, ::prost::Oneof)]
+    pub enum FactoryType {
+        /// DataFusion's built-in DefaultPhysicalExprAdapterFactory; needs no codec.
+        #[prost(message, tag = "1")]
+        Default(super::DefaultPhysicalExprAdapterFactoryNode),
+        /// Opaque payload produced by
+        /// PhysicalExtensionCodec::try_encode_expr_adapter_factory.
+        #[prost(bytes, tag = "2")]
+        Extension(::prost::alloc::vec::Vec<u8>),
+    }
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct DefaultPhysicalExprAdapterFactoryNode {}
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ParquetScanExecNode {
     #[prost(message, optional, tag = "1")]

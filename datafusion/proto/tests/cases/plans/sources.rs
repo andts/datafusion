@@ -25,9 +25,12 @@ use super::{
 use arrow::array::RecordBatch;
 use arrow::datatypes::Fields;
 use datafusion::arrow::compute::kernels::sort::SortOptions;
+use datafusion::arrow::datatypes::SchemaRef;
 use datafusion::arrow::datatypes::{DataType, Field, Schema};
+use datafusion::assert_batches_eq;
 use datafusion::datasource::empty::EmptyTable;
 use datafusion::datasource::file_format::json::JsonFormat;
+use datafusion::datasource::file_format::parquet::ParquetFormat;
 use datafusion::datasource::listing::{
     ListingOptions, ListingTable, ListingTableConfig, ListingTableUrl, PartitionedFile,
 };
@@ -40,6 +43,11 @@ use datafusion::datasource::source::DataSourceExec;
 use datafusion::execution::TaskContext;
 use datafusion::logical_expr::Operator;
 use datafusion::physical_expr::LexOrdering;
+use datafusion::physical_expr_adapter::{
+    DefaultPhysicalExprAdapterFactory, PhysicalExprAdapter, PhysicalExprAdapterFactory,
+    replace_columns_with_literals,
+};
+use datafusion::physical_plan::collect;
 use datafusion::physical_plan::expressions::{
     BinaryExpr, Column, PhysicalSortExpr, col, lit,
 };
@@ -51,12 +59,17 @@ use datafusion::physical_plan::{
 use datafusion::prelude::SessionContext;
 use datafusion::scalar::ScalarValue;
 use datafusion_common::config::TableParquetOptions;
+use datafusion_common::not_impl_err;
 use datafusion_common::stats::Precision;
 use datafusion_common::{DataFusionError, Result, internal_datafusion_err, internal_err};
 use datafusion_datasource::{TableSchema, TableSchemaBuilder};
 use datafusion_expr::ColumnarValue;
 use datafusion_physical_expr_common::physical_expr::proto_decode::PhysicalExprDecodeCtx;
 use datafusion_physical_expr_common::physical_expr::proto_encode::PhysicalExprEncodeCtx;
+use datafusion_proto::bytes::{
+    physical_plan_from_bytes_with_extension_codec,
+    physical_plan_to_bytes_with_extension_codec,
+};
 use datafusion_proto::physical_plan::{
     AsExecutionPlan, DefaultPhysicalExtensionCodec, DefaultPhysicalProtoConverter,
     PhysicalExtensionCodec, PhysicalProtoConverterExtension,
@@ -786,5 +799,184 @@ fn roundtrip_parquet_exec_range_output_partitioning() -> Result<()> {
         Some(output_partitioning)
     );
 
+    Ok(())
+}
+
+/// Fills `column` with `value` in files that lack it, where DataFusion's
+/// default adapter would produce NULL. Stateful, so the test also proves the
+/// factory's state crosses the wire.
+#[derive(Debug)]
+struct FillMissingColumnFactory {
+    column: String,
+    value: i32,
+}
+
+impl PhysicalExprAdapterFactory for FillMissingColumnFactory {
+    fn create(
+        &self,
+        logical_file_schema: SchemaRef,
+        physical_file_schema: SchemaRef,
+    ) -> Result<Arc<dyn PhysicalExprAdapter>> {
+        let replacement = physical_file_schema
+            .index_of(&self.column)
+            .is_err()
+            .then(|| (self.column.clone(), ScalarValue::Int32(Some(self.value))));
+        Ok(Arc::new(FillMissingColumnAdapter {
+            replacement,
+            inner: DefaultPhysicalExprAdapterFactory
+                .create(logical_file_schema, physical_file_schema)?,
+        }))
+    }
+}
+
+#[derive(Debug)]
+struct FillMissingColumnAdapter {
+    replacement: Option<(String, ScalarValue)>,
+    inner: Arc<dyn PhysicalExprAdapter>,
+}
+
+impl PhysicalExprAdapter for FillMissingColumnAdapter {
+    fn rewrite(&self, expr: Arc<dyn PhysicalExpr>) -> Result<Arc<dyn PhysicalExpr>> {
+        let expr = match &self.replacement {
+            Some((column, value)) => replace_columns_with_literals(
+                expr,
+                &HashMap::from([(column.as_str(), value)]),
+            )?,
+            None => expr,
+        };
+        self.inner.rewrite(expr)
+    }
+}
+
+/// Serializes [`FillMissingColumnFactory`] as `"<column>=<value>"`.
+#[derive(Debug)]
+struct FillMissingColumnCodec;
+
+impl PhysicalExtensionCodec for FillMissingColumnCodec {
+    fn try_decode(
+        &self,
+        _buf: &[u8],
+        _inputs: &[Arc<dyn ExecutionPlan>],
+        _ctx: &TaskContext,
+        _proto_converter: &dyn PhysicalProtoConverterExtension,
+    ) -> Result<Arc<dyn ExecutionPlan>> {
+        internal_err!("FillMissingColumnCodec only handles adapter factories")
+    }
+
+    fn try_encode(
+        &self,
+        _node: Arc<dyn ExecutionPlan>,
+        _buf: &mut Vec<u8>,
+        _proto_converter: &dyn PhysicalProtoConverterExtension,
+    ) -> Result<()> {
+        internal_err!("FillMissingColumnCodec only handles adapter factories")
+    }
+
+    fn try_encode_expr_adapter_factory(
+        &self,
+        factory: &Arc<dyn PhysicalExprAdapterFactory>,
+        buf: &mut Vec<u8>,
+    ) -> Result<()> {
+        let Some(fill) = factory.downcast_ref::<FillMissingColumnFactory>() else {
+            return not_impl_err!(
+                "FillMissingColumnCodec only encodes FillMissingColumnFactory"
+            );
+        };
+        buf.extend_from_slice(format!("{}={}", fill.column, fill.value).as_bytes());
+        Ok(())
+    }
+
+    fn try_decode_expr_adapter_factory(
+        &self,
+        buf: &[u8],
+    ) -> Result<Arc<dyn PhysicalExprAdapterFactory>> {
+        let text =
+            std::str::from_utf8(buf).map_err(|e| internal_datafusion_err!("{e}"))?;
+        let (column, value) = text
+            .split_once('=')
+            .ok_or_else(|| internal_datafusion_err!("malformed payload: {text}"))?;
+        Ok(Arc::new(FillMissingColumnFactory {
+            column: column.to_string(),
+            value: value.parse().map_err(|e| internal_datafusion_err!("{e}"))?,
+        }))
+    }
+}
+
+/// A scan's `PhysicalExprAdapterFactory` is semantics: the deserialized plan
+/// must return the same rows as the original. Before the factory was
+/// serialized, the decoded scan fell back to the default adapter and returned
+/// NULL for `extra`.
+///
+/// Plans are encoded *before* they are executed: an executed plan carries
+/// runtime dynamic-filter state (TopK thresholds, hash-join `InList` filters)
+/// that would be shipped along and cause failures unrelated to this test.
+#[tokio::test]
+async fn roundtrip_listing_table_preserves_expr_adapter_factory_semantics() -> Result<()>
+{
+    let ctx = SessionContext::new();
+    let testdata = datafusion::test_util::parquet_test_data();
+    let table_url = ListingTableUrl::parse(format!("{testdata}/alltypes_plain.parquet"))?;
+    let listing_options = ListingOptions::new(Arc::new(ParquetFormat::default()))
+        .with_file_extension(".parquet");
+    let config = ListingTableConfig::new(table_url)
+        .with_listing_options(listing_options)
+        .infer_schema(&ctx.state())
+        .await?;
+
+    // `alltypes_plain.parquet` has no `extra` column; the table declares one.
+    let file_schema = config.file_schema.clone().expect("inferred schema");
+    let mut fields = file_schema.fields().to_vec();
+    fields.push(Arc::new(Field::new("extra", DataType::Int32, true)));
+    let config = config
+        .with_schema(Arc::new(Schema::new(fields)))
+        .with_expr_adapter_factory(Arc::new(FillMissingColumnFactory {
+            column: "extra".to_string(),
+            value: 42,
+        }));
+    ctx.register_table("t", Arc::new(ListingTable::try_new(config)?))?;
+
+    let plan = ctx
+        .sql("SELECT id, extra FROM t ORDER BY id")
+        .await?
+        .create_physical_plan()
+        .await?;
+
+    // Without a codec for the factory, serialization refuses instead of dropping it.
+    let err = physical_plan_to_bytes_with_extension_codec(
+        Arc::clone(&plan),
+        &DefaultPhysicalExtensionCodec {},
+    )
+    .expect_err("a custom adapter factory must not be dropped silently");
+    assert!(
+        err.to_string().contains("FillMissingColumnFactory"),
+        "{err}"
+    );
+
+    let bytes = physical_plan_to_bytes_with_extension_codec(
+        Arc::clone(&plan),
+        &FillMissingColumnCodec,
+    )?;
+    let decoded = physical_plan_from_bytes_with_extension_codec(
+        &bytes,
+        ctx.task_ctx().as_ref(),
+        &FillMissingColumnCodec,
+    )?;
+
+    let expected = [
+        "+----+-------+",
+        "| id | extra |",
+        "+----+-------+",
+        "| 0  | 42    |",
+        "| 1  | 42    |",
+        "| 2  | 42    |",
+        "| 3  | 42    |",
+        "| 4  | 42    |",
+        "| 5  | 42    |",
+        "| 6  | 42    |",
+        "| 7  | 42    |",
+        "+----+-------+",
+    ];
+    assert_batches_eq!(expected, &collect(plan, ctx.task_ctx()).await?);
+    assert_batches_eq!(expected, &collect(decoded, ctx.task_ctx()).await?);
     Ok(())
 }

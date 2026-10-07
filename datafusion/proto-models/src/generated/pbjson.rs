@@ -5265,6 +5265,77 @@ impl<'de> serde::Deserialize<'de> for DateUnit {
         deserializer.deserialize_any(GeneratedVisitor)
     }
 }
+impl serde::Serialize for DefaultPhysicalExprAdapterFactoryNode {
+    #[allow(deprecated)]
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeStruct;
+        let len = 0;
+        let struct_ser = serializer.serialize_struct("datafusion.DefaultPhysicalExprAdapterFactoryNode", len)?;
+        struct_ser.end()
+    }
+}
+impl<'de> serde::Deserialize<'de> for DefaultPhysicalExprAdapterFactoryNode {
+    #[allow(deprecated)]
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        const FIELDS: &[&str] = &[
+        ];
+
+        #[allow(clippy::enum_variant_names)]
+        enum GeneratedField {
+        }
+        impl<'de> serde::Deserialize<'de> for GeneratedField {
+            fn deserialize<D>(deserializer: D) -> std::result::Result<GeneratedField, D::Error>
+            where
+                D: serde::Deserializer<'de>,
+            {
+                struct GeneratedVisitor;
+
+                impl serde::de::Visitor<'_> for GeneratedVisitor {
+                    type Value = GeneratedField;
+
+                    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                        write!(formatter, "expected one of: {:?}", &FIELDS)
+                    }
+
+                    #[allow(unused_variables)]
+                    fn visit_str<E>(self, value: &str) -> std::result::Result<GeneratedField, E>
+                    where
+                        E: serde::de::Error,
+                    {
+                            Err(serde::de::Error::unknown_field(value, FIELDS))
+                    }
+                }
+                deserializer.deserialize_identifier(GeneratedVisitor)
+            }
+        }
+        struct GeneratedVisitor;
+        impl<'de> serde::de::Visitor<'de> for GeneratedVisitor {
+            type Value = DefaultPhysicalExprAdapterFactoryNode;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("struct datafusion.DefaultPhysicalExprAdapterFactoryNode")
+            }
+
+            fn visit_map<V>(self, mut map_: V) -> std::result::Result<DefaultPhysicalExprAdapterFactoryNode, V::Error>
+                where
+                    V: serde::de::MapAccess<'de>,
+            {
+                while map_.next_key::<GeneratedField>()?.is_some() {
+                    let _ = map_.next_value::<serde::de::IgnoredAny>()?;
+                }
+                Ok(DefaultPhysicalExprAdapterFactoryNode {
+                })
+            }
+        }
+        deserializer.deserialize_struct("datafusion.DefaultPhysicalExprAdapterFactoryNode", FIELDS, GeneratedVisitor)
+    }
+}
 impl serde::Serialize for DistinctNode {
     #[allow(deprecated)]
     fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
@@ -7019,6 +7090,9 @@ impl serde::Serialize for FileScanExecConf {
         if self.output_partitioning.is_some() {
             len += 1;
         }
+        if self.expr_adapter_factory.is_some() {
+            len += 1;
+        }
         let mut struct_ser = serializer.serialize_struct("datafusion.FileScanExecConf", len)?;
         if !self.file_groups.is_empty() {
             struct_ser.serialize_field("fileGroups", &self.file_groups)?;
@@ -7058,6 +7132,9 @@ impl serde::Serialize for FileScanExecConf {
         if let Some(v) = self.output_partitioning.as_ref() {
             struct_ser.serialize_field("outputPartitioning", v)?;
         }
+        if let Some(v) = self.expr_adapter_factory.as_ref() {
+            struct_ser.serialize_field("exprAdapterFactory", v)?;
+        }
         struct_ser.end()
     }
 }
@@ -7087,6 +7164,8 @@ impl<'de> serde::Deserialize<'de> for FileScanExecConf {
             "projectionExprs",
             "output_partitioning",
             "outputPartitioning",
+            "expr_adapter_factory",
+            "exprAdapterFactory",
         ];
 
         #[allow(clippy::enum_variant_names)]
@@ -7103,6 +7182,7 @@ impl<'de> serde::Deserialize<'de> for FileScanExecConf {
             BatchSize,
             ProjectionExprs,
             OutputPartitioning,
+            ExprAdapterFactory,
         }
         impl<'de> serde::Deserialize<'de> for GeneratedField {
             fn deserialize<D>(deserializer: D) -> std::result::Result<GeneratedField, D::Error>
@@ -7136,6 +7216,7 @@ impl<'de> serde::Deserialize<'de> for FileScanExecConf {
                             "batchSize" | "batch_size" => Ok(GeneratedField::BatchSize),
                             "projectionExprs" | "projection_exprs" => Ok(GeneratedField::ProjectionExprs),
                             "outputPartitioning" | "output_partitioning" => Ok(GeneratedField::OutputPartitioning),
+                            "exprAdapterFactory" | "expr_adapter_factory" => Ok(GeneratedField::ExprAdapterFactory),
                             _ => Err(serde::de::Error::unknown_field(value, FIELDS)),
                         }
                     }
@@ -7167,6 +7248,7 @@ impl<'de> serde::Deserialize<'de> for FileScanExecConf {
                 let mut batch_size__ = None;
                 let mut projection_exprs__ = None;
                 let mut output_partitioning__ = None;
+                let mut expr_adapter_factory__ = None;
                 while let Some(k) = map_.next_key()? {
                     match k {
                         GeneratedField::FileGroups => {
@@ -7246,6 +7328,12 @@ impl<'de> serde::Deserialize<'de> for FileScanExecConf {
                             }
                             output_partitioning__ = map_.next_value()?;
                         }
+                        GeneratedField::ExprAdapterFactory => {
+                            if expr_adapter_factory__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("exprAdapterFactory"));
+                            }
+                            expr_adapter_factory__ = map_.next_value()?;
+                        }
                     }
                 }
                 Ok(FileScanExecConf {
@@ -7261,6 +7349,7 @@ impl<'de> serde::Deserialize<'de> for FileScanExecConf {
                     batch_size: batch_size__,
                     projection_exprs: projection_exprs__,
                     output_partitioning: output_partitioning__,
+                    expr_adapter_factory: expr_adapter_factory__,
                 })
             }
         }
@@ -18393,6 +18482,116 @@ impl<'de> serde::Deserialize<'de> for PhysicalDynamicFilterNode {
             }
         }
         deserializer.deserialize_struct("datafusion.PhysicalDynamicFilterNode", FIELDS, GeneratedVisitor)
+    }
+}
+impl serde::Serialize for PhysicalExprAdapterFactoryNode {
+    #[allow(deprecated)]
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeStruct;
+        let mut len = 0;
+        if self.factory_type.is_some() {
+            len += 1;
+        }
+        let mut struct_ser = serializer.serialize_struct("datafusion.PhysicalExprAdapterFactoryNode", len)?;
+        if let Some(v) = self.factory_type.as_ref() {
+            match v {
+                physical_expr_adapter_factory_node::FactoryType::Default(v) => {
+                    struct_ser.serialize_field("default", v)?;
+                }
+                physical_expr_adapter_factory_node::FactoryType::Extension(v) => {
+                    #[allow(clippy::needless_borrow)]
+                    #[allow(clippy::needless_borrows_for_generic_args)]
+                    struct_ser.serialize_field("extension", pbjson::private::base64::encode(&v).as_str())?;
+                }
+            }
+        }
+        struct_ser.end()
+    }
+}
+impl<'de> serde::Deserialize<'de> for PhysicalExprAdapterFactoryNode {
+    #[allow(deprecated)]
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        const FIELDS: &[&str] = &[
+            "default",
+            "extension",
+        ];
+
+        #[allow(clippy::enum_variant_names)]
+        enum GeneratedField {
+            Default,
+            Extension,
+        }
+        impl<'de> serde::Deserialize<'de> for GeneratedField {
+            fn deserialize<D>(deserializer: D) -> std::result::Result<GeneratedField, D::Error>
+            where
+                D: serde::Deserializer<'de>,
+            {
+                struct GeneratedVisitor;
+
+                impl serde::de::Visitor<'_> for GeneratedVisitor {
+                    type Value = GeneratedField;
+
+                    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                        write!(formatter, "expected one of: {:?}", &FIELDS)
+                    }
+
+                    #[allow(unused_variables)]
+                    fn visit_str<E>(self, value: &str) -> std::result::Result<GeneratedField, E>
+                    where
+                        E: serde::de::Error,
+                    {
+                        match value {
+                            "default" => Ok(GeneratedField::Default),
+                            "extension" => Ok(GeneratedField::Extension),
+                            _ => Err(serde::de::Error::unknown_field(value, FIELDS)),
+                        }
+                    }
+                }
+                deserializer.deserialize_identifier(GeneratedVisitor)
+            }
+        }
+        struct GeneratedVisitor;
+        impl<'de> serde::de::Visitor<'de> for GeneratedVisitor {
+            type Value = PhysicalExprAdapterFactoryNode;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("struct datafusion.PhysicalExprAdapterFactoryNode")
+            }
+
+            fn visit_map<V>(self, mut map_: V) -> std::result::Result<PhysicalExprAdapterFactoryNode, V::Error>
+                where
+                    V: serde::de::MapAccess<'de>,
+            {
+                let mut factory_type__ = None;
+                while let Some(k) = map_.next_key()? {
+                    match k {
+                        GeneratedField::Default => {
+                            if factory_type__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("default"));
+                            }
+                            factory_type__ = map_.next_value::<::std::option::Option<_>>()?.map(physical_expr_adapter_factory_node::FactoryType::Default)
+;
+                        }
+                        GeneratedField::Extension => {
+                            if factory_type__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("extension"));
+                            }
+                            factory_type__ = map_.next_value::<::std::option::Option<::pbjson::private::BytesDeserialize<_>>>()?.map(|x| physical_expr_adapter_factory_node::FactoryType::Extension(x.0));
+                        }
+                    }
+                }
+                Ok(PhysicalExprAdapterFactoryNode {
+                    factory_type: factory_type__,
+                })
+            }
+        }
+        deserializer.deserialize_struct("datafusion.PhysicalExprAdapterFactoryNode", FIELDS, GeneratedVisitor)
     }
 }
 impl serde::Serialize for PhysicalExprNode {

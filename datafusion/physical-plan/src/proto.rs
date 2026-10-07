@@ -66,6 +66,7 @@ use datafusion_execution::TaskContext;
 use datafusion_expr::physical_planning_context::ScalarSubqueryResults;
 use datafusion_expr::{AggregateUDF, ScalarUDF, WindowUDF};
 use datafusion_physical_expr::PhysicalExpr;
+use datafusion_physical_expr_adapter::PhysicalExprAdapterFactory;
 use datafusion_physical_expr_common::physical_expr::proto_decode::{
     PhysicalExprDecode, PhysicalExprDecodeCtx,
 };
@@ -104,6 +105,14 @@ pub trait ExecutionPlanEncode {
     /// Serialize a window UDF to an opaque payload. `None` means "decodable by
     /// name alone".
     fn encode_udwf(&self, udwf: &WindowUDF) -> Result<Option<Vec<u8>>>;
+
+    /// Serialize a custom [`PhysicalExprAdapterFactory`] attached to a file
+    /// scan to an opaque payload via the extension codec. Errors when no codec
+    /// handles the factory. Bytes-only: no proto types cross this boundary.
+    fn encode_expr_adapter_factory(
+        &self,
+        factory: &Arc<dyn PhysicalExprAdapterFactory>,
+    ) -> Result<Vec<u8>>;
 }
 
 /// Internal dispatch trait backing [`ExecutionPlanDecodeCtx`].
@@ -153,6 +162,13 @@ pub trait ExecutionPlanDecode {
 
     /// Reconstruct a window UDF from its name and optional payload.
     fn decode_udwf(&self, name: &str, payload: Option<&[u8]>) -> Result<Arc<WindowUDF>>;
+
+    /// Reconstruct a [`PhysicalExprAdapterFactory`] from a payload produced by
+    /// [`ExecutionPlanEncode::encode_expr_adapter_factory`].
+    fn decode_expr_adapter_factory(
+        &self,
+        payload: &[u8],
+    ) -> Result<Arc<dyn PhysicalExprAdapterFactory>>;
 }
 
 /// Context handed to [`ExecutionPlan::try_to_proto`].
@@ -215,6 +231,16 @@ impl<'a> ExecutionPlanEncodeCtx<'a> {
     /// Serialize a window UDF to an opaque payload (`None` = decodable by name).
     pub fn encode_udwf(&self, udwf: &WindowUDF) -> Result<Option<Vec<u8>>> {
         self.encoder.encode_udwf(udwf)
+    }
+
+    /// Serialize a custom [`PhysicalExprAdapterFactory`] to an opaque payload
+    /// through the extension codec. Errors when no codec handles it; callers
+    /// handle DataFusion's built-in default factory themselves.
+    pub fn encode_expr_adapter_factory(
+        &self,
+        factory: &Arc<dyn PhysicalExprAdapterFactory>,
+    ) -> Result<Vec<u8>> {
+        self.encoder.encode_expr_adapter_factory(factory)
     }
 
     /// An expression-level encode context backed by this plan context.
@@ -341,6 +367,15 @@ impl<'a> ExecutionPlanDecodeCtx<'a> {
         payload: Option<&[u8]>,
     ) -> Result<Arc<WindowUDF>> {
         self.decoder.decode_udwf(name, payload)
+    }
+
+    /// Reconstruct a [`PhysicalExprAdapterFactory`] from a payload produced by
+    /// [`ExecutionPlanEncodeCtx::encode_expr_adapter_factory`].
+    pub fn decode_expr_adapter_factory(
+        &self,
+        payload: &[u8],
+    ) -> Result<Arc<dyn PhysicalExprAdapterFactory>> {
+        self.decoder.decode_expr_adapter_factory(payload)
     }
 
     /// An expression-level decode context backed by this plan context, bound to
