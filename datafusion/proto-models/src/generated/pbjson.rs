@@ -7093,6 +7093,9 @@ impl serde::Serialize for FileScanExecConf {
         if self.expr_adapter_factory.is_some() {
             len += 1;
         }
+        if !self.virtual_columns.is_empty() {
+            len += 1;
+        }
         let mut struct_ser = serializer.serialize_struct("datafusion.FileScanExecConf", len)?;
         if !self.file_groups.is_empty() {
             struct_ser.serialize_field("fileGroups", &self.file_groups)?;
@@ -7135,6 +7138,9 @@ impl serde::Serialize for FileScanExecConf {
         if let Some(v) = self.expr_adapter_factory.as_ref() {
             struct_ser.serialize_field("exprAdapterFactory", v)?;
         }
+        if !self.virtual_columns.is_empty() {
+            struct_ser.serialize_field("virtualColumns", &self.virtual_columns)?;
+        }
         struct_ser.end()
     }
 }
@@ -7166,6 +7172,8 @@ impl<'de> serde::Deserialize<'de> for FileScanExecConf {
             "outputPartitioning",
             "expr_adapter_factory",
             "exprAdapterFactory",
+            "virtual_columns",
+            "virtualColumns",
         ];
 
         #[allow(clippy::enum_variant_names)]
@@ -7183,6 +7191,7 @@ impl<'de> serde::Deserialize<'de> for FileScanExecConf {
             ProjectionExprs,
             OutputPartitioning,
             ExprAdapterFactory,
+            VirtualColumns,
         }
         impl<'de> serde::Deserialize<'de> for GeneratedField {
             fn deserialize<D>(deserializer: D) -> std::result::Result<GeneratedField, D::Error>
@@ -7217,6 +7226,7 @@ impl<'de> serde::Deserialize<'de> for FileScanExecConf {
                             "projectionExprs" | "projection_exprs" => Ok(GeneratedField::ProjectionExprs),
                             "outputPartitioning" | "output_partitioning" => Ok(GeneratedField::OutputPartitioning),
                             "exprAdapterFactory" | "expr_adapter_factory" => Ok(GeneratedField::ExprAdapterFactory),
+                            "virtualColumns" | "virtual_columns" => Ok(GeneratedField::VirtualColumns),
                             _ => Err(serde::de::Error::unknown_field(value, FIELDS)),
                         }
                     }
@@ -7249,6 +7259,7 @@ impl<'de> serde::Deserialize<'de> for FileScanExecConf {
                 let mut projection_exprs__ = None;
                 let mut output_partitioning__ = None;
                 let mut expr_adapter_factory__ = None;
+                let mut virtual_columns__ = None;
                 while let Some(k) = map_.next_key()? {
                     match k {
                         GeneratedField::FileGroups => {
@@ -7334,6 +7345,12 @@ impl<'de> serde::Deserialize<'de> for FileScanExecConf {
                             }
                             expr_adapter_factory__ = map_.next_value()?;
                         }
+                        GeneratedField::VirtualColumns => {
+                            if virtual_columns__.is_some() {
+                                return Err(serde::de::Error::duplicate_field("virtualColumns"));
+                            }
+                            virtual_columns__ = Some(map_.next_value()?);
+                        }
                     }
                 }
                 Ok(FileScanExecConf {
@@ -7350,6 +7367,7 @@ impl<'de> serde::Deserialize<'de> for FileScanExecConf {
                     projection_exprs: projection_exprs__,
                     output_partitioning: output_partitioning__,
                     expr_adapter_factory: expr_adapter_factory__,
+                    virtual_columns: virtual_columns__.unwrap_or_default(),
                 })
             }
         }

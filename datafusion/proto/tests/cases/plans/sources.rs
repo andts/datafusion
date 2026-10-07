@@ -24,7 +24,10 @@ use super::{
 };
 use arrow::array::RecordBatch;
 use arrow::datatypes::Fields;
+use datafusion::arrow::array::{ArrayRef, AsArray};
 use datafusion::arrow::compute::kernels::sort::SortOptions;
+use datafusion::arrow::datatypes::FieldRef;
+use datafusion::arrow::datatypes::Int64Type;
 use datafusion::arrow::datatypes::SchemaRef;
 use datafusion::arrow::datatypes::{DataType, Field, Schema};
 use datafusion::assert_batches_eq;
@@ -42,12 +45,16 @@ use datafusion::datasource::physical_plan::{
 use datafusion::datasource::source::DataSourceExec;
 use datafusion::execution::TaskContext;
 use datafusion::logical_expr::Operator;
+use datafusion::parquet::arrow::ArrowWriter;
+use datafusion::parquet::arrow::RowNumber;
+use datafusion::parquet::file::properties::WriterProperties;
 use datafusion::physical_expr::LexOrdering;
 use datafusion::physical_expr_adapter::{
     DefaultPhysicalExprAdapterFactory, PhysicalExprAdapter, PhysicalExprAdapterFactory,
     replace_columns_with_literals,
 };
 use datafusion::physical_plan::collect;
+use datafusion::physical_plan::expressions::in_list;
 use datafusion::physical_plan::expressions::{
     BinaryExpr, Column, PhysicalSortExpr, col, lit,
 };
@@ -57,6 +64,7 @@ use datafusion::physical_plan::{
     displayable,
 };
 use datafusion::prelude::SessionContext;
+use datafusion::prelude::{ParquetReadOptions, SessionConfig};
 use datafusion::scalar::ScalarValue;
 use datafusion_common::config::TableParquetOptions;
 use datafusion_common::not_impl_err;
@@ -75,6 +83,9 @@ use datafusion_proto::physical_plan::{
     PhysicalExtensionCodec, PhysicalProtoConverterExtension,
 };
 use datafusion_proto::protobuf::PhysicalPlanNode;
+use object_store::memory::InMemory;
+use object_store::path::Path as ObjectStorePath;
+use object_store::{ObjectStore, ObjectStoreExt, PutPayload};
 use prost::Message;
 use std::collections::HashMap;
 use std::fmt::{Display, Formatter};
@@ -978,5 +989,188 @@ async fn roundtrip_listing_table_preserves_expr_adapter_factory_semantics() -> R
     ];
     assert_batches_eq!(expected, &collect(plan, ctx.task_ctx()).await?);
     assert_batches_eq!(expected, &collect(decoded, ctx.task_ctx()).await?);
+    Ok(())
+}
+
+/// A Parquet scan with an explicit `RowNumber` virtual column round-trips: the
+/// virtual column (extension type included), the projection that selects it and
+/// a predicate over it all survive. `InList` checks its column's type against the
+/// decode schema, so the predicate only decodes if that schema has the virtual
+/// column.
+#[test]
+fn roundtrip_parquet_exec_with_virtual_column() -> Result<()> {
+    let file_schema =
+        Arc::new(Schema::new(vec![Field::new("col", DataType::Utf8, false)]));
+    let row_idx: FieldRef = Arc::new(
+        Field::new("row_idx", DataType::Int64, false).with_extension_type(RowNumber),
+    );
+    let table_schema = TableSchemaBuilder::from(&file_schema)
+        .with_table_partition_cols(vec![Arc::new(Field::new(
+            "part",
+            DataType::Utf8,
+            false,
+        ))])
+        .with_virtual_columns(vec![Arc::clone(&row_idx)])
+        .build();
+
+    let predicate = in_list(
+        col("row_idx", table_schema.table_schema())?,
+        vec![lit(1i64), lit(2i64)],
+        &false,
+        table_schema.table_schema(),
+    )?;
+    let file_source =
+        Arc::new(ParquetSource::new(table_schema.clone()).with_predicate(predicate));
+
+    // Table schema: col (0), part (1), row_idx (2).
+    let scan_config =
+        FileScanConfigBuilder::new(ObjectStoreUrl::local_filesystem(), file_source)
+            .with_projection_indices(Some(vec![0, 2]))?
+            .with_file_group(FileGroup::new(vec![
+                PartitionedFile::new("/path/to/part=a/file.parquet".to_string(), 1024)
+                    .with_partition_values(vec![ScalarValue::Utf8(Some(
+                        "a".to_string(),
+                    ))]),
+            ]))
+            .build();
+    let expected_schema = scan_config.projected_schema()?;
+
+    let decoded = roundtrip_file_scan_config(scan_config)?;
+    assert_eq!(
+        decoded.file_source().table_schema().virtual_columns(),
+        &Fields::from(vec![row_idx])
+    );
+    // Field equality includes metadata, so this also checks the extension type.
+    assert_eq!(decoded.projected_schema()?, expected_schema);
+    Ok(())
+}
+
+/// `SELECT file_row_index()` is pushed into the Parquet scan as a
+/// `__datafusion_file_row_index` virtual column (see `file_row_index.slt`);
+/// the rewritten scan must round-trip with an unchanged output schema.
+#[tokio::test]
+async fn roundtrip_parquet_scan_with_file_row_index() -> Result<()> {
+    let ctx = all_types_context().await?;
+    let plan = ctx
+        .sql("SELECT file_row_index(), id FROM alltypes_plain")
+        .await?
+        .create_physical_plan()
+        .await?;
+
+    let decoded = roundtrip_test_and_return(
+        Arc::clone(&plan),
+        &ctx,
+        &DefaultPhysicalExtensionCodec {},
+        &DefaultPhysicalProtoConverter {},
+    )?;
+    assert_eq!(decoded.schema(), plan.schema());
+    Ok(())
+}
+
+/// The `FileScanConfig` of the first file scan in `plan`, if any.
+fn find_file_scan_config(plan: &Arc<dyn ExecutionPlan>) -> Option<FileScanConfig> {
+    if let Some(exec) = plan.downcast_ref::<DataSourceExec>() {
+        return exec.data_source().downcast_ref::<FileScanConfig>().cloned();
+    }
+    plan.children().into_iter().find_map(find_file_scan_config)
+}
+
+/// `(row position, value)` pairs from a two-column `Int64` result, sorted.
+fn position_value_pairs(batches: &[RecordBatch]) -> Vec<(i64, i64)> {
+    let mut pairs = vec![];
+    for batch in batches {
+        let positions = batch.column(0).as_primitive::<Int64Type>();
+        let values = batch.column(1).as_primitive::<Int64Type>();
+        pairs.extend(
+            positions
+                .values()
+                .iter()
+                .copied()
+                .zip(values.values().iter().copied()),
+        );
+    }
+    pairs.sort_unstable();
+    pairs
+}
+
+/// Row-level deletes (e.g. Iceberg position deletes) key on each row's absolute
+/// position in its file. When one file is split into byte-range partitions,
+/// `file_row_index()` must still report absolute positions, both in the
+/// original plan and after a `datafusion-proto` round trip.
+///
+/// Plans are encoded *before* they are executed: an executed plan carries
+/// runtime dynamic-filter state that would be shipped along.
+#[tokio::test]
+async fn roundtrip_file_row_index_keeps_absolute_positions_across_byte_ranges()
+-> Result<()> {
+    // 100 rows in 10 row groups; `v` equals each row's position in the file.
+    let batch = RecordBatch::try_from_iter([(
+        "v",
+        Arc::new(arrow::array::Int64Array::from_iter_values(0..100)) as ArrayRef,
+    )])?;
+    let mut buf = vec![];
+    let props = WriterProperties::builder()
+        .set_max_row_group_row_count(Some(10))
+        .build();
+    let mut writer = ArrowWriter::try_new(&mut buf, batch.schema(), Some(props))?;
+    writer.write(&batch)?;
+    writer.close()?;
+    let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    store
+        .put(
+            &ObjectStorePath::from("data.parquet"),
+            PutPayload::from_bytes(buf.into()),
+        )
+        .await?;
+
+    // Split the single file into byte-range partitions.
+    let mut config = SessionConfig::new().with_target_partitions(4);
+    config.options_mut().optimizer.repartition_file_min_size = 0;
+    let ctx = SessionContext::new_with_config(config);
+    ctx.runtime_env()
+        .register_object_store(ObjectStoreUrl::parse("memory://")?.as_ref(), store);
+    ctx.register_parquet("t", "memory:///data.parquet", ParquetReadOptions::default())
+        .await?;
+
+    let plan = ctx
+        // The filter gives the optimizer a reason to parallelize the scan;
+        // a bare projection over one file is left as a single partition.
+        .sql("SELECT file_row_index(), v FROM t WHERE v >= 0")
+        .await?
+        .create_physical_plan()
+        .await?;
+    // Check the scan itself was split: a partition count above 1 alone would
+    // also hold for a round-robin repartition over a single unsplit scan.
+    let scan = find_file_scan_config(&plan).expect("plan has a file scan");
+    assert!(
+        scan.file_groups.len() > 1
+            && scan
+                .file_groups
+                .iter()
+                .flat_map(|group| group.iter())
+                .all(|file| file.range.is_some()),
+        "expected the file to be split into byte ranges:\n{}",
+        displayable(plan.as_ref()).indent(true)
+    );
+
+    let bytes = physical_plan_to_bytes_with_extension_codec(
+        Arc::clone(&plan),
+        &DefaultPhysicalExtensionCodec {},
+    )?;
+    let decoded = physical_plan_from_bytes_with_extension_codec(
+        &bytes,
+        ctx.task_ctx().as_ref(),
+        &DefaultPhysicalExtensionCodec {},
+    )?;
+
+    let expected: Vec<(i64, i64)> = (0..100).map(|i| (i, i)).collect();
+    assert_eq!(
+        position_value_pairs(&collect(plan, ctx.task_ctx()).await?),
+        expected
+    );
+    assert_eq!(
+        position_value_pairs(&collect(decoded, ctx.task_ctx()).await?),
+        expected
+    );
     Ok(())
 }
